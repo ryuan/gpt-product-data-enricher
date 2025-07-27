@@ -4,7 +4,7 @@
 
 The program ingests data from 3 sources - tabular CSV data from suppliers, product images, and crawled website data from suppliers. It then processes all the data, mapping them to standardized fields, while adding, omitting, and modifying (both rewriting and normalizing) data for accuracy, originality, and filterability.
 
-The program leverages the Batch API for cost efficiency, as well as the new Responses API endpoint to take advantage of advanced capabilities like ascynchronous Web Search to fetch even more data for each payload processed within a batch.
+The program leverages the Batch API for cost efficiency, as well as the new Responses API endpoint to take advantage of new capabilities like ascynchronous Web Search to fetch even more data for each payload processed within a batch.
 
 ## To-Do's
 
