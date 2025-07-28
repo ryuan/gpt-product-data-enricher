@@ -8,6 +8,7 @@ def main():
     supplier_data_path, image_urls_path, fields_path = modules.get_source_paths()
     supplier_data_df, image_urls_df, fields_df = modules.get_input_dfs(supplier_data_path, image_urls_path, fields_path)
     sku_col_name, process_order_numbers = modules.sequence_batches(supplier_data_df, fields_df)
+    sku_to_model, model_to_skus = modules.get_related_skus(sku_col_name, supplier_data_df, image_urls_df)
 
     # Construct prompts, structure output JSON schemas, and generate batch payloads for each process sequence
     batch_payloads_path = 'output/batch_payloads.jsonl'
@@ -16,8 +17,8 @@ def main():
     model = 'gpt-4o'
 
     for process_order_number in process_order_numbers:
-        batch_payloads = modules.generate_batch_payloads(sku_col_name, process_order_number, endpoint, model, 
-                                                         batch_results_path, supplier_data_df, image_urls_df, fields_df)
+        batch_payloads = modules.generate_batch_payloads(process_order_number, batch_results_path, endpoint, model, sku_col_name, sku_to_model, model_to_skus,
+                                                         supplier_data_df, image_urls_df, fields_df)
 
         # Create batch payloads JSONL file, upload it, then execute batch payloads asynchronously
         modules.export_batch_to_jsonl(batch_payloads, batch_payloads_path)

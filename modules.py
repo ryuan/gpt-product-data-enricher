@@ -3,12 +3,14 @@ import time
 import json
 import os
 import sys
+import re
 import pandas as pd
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import List, Tuple, Dict
 from utils import print_options
 from fragments import object_schema_reference
+
 
 def init():
     load_dotenv()
@@ -56,6 +58,30 @@ def get_input_dfs(supplier_data_path: Path, image_urls_path: Path, fields_path: 
 
     return supplier_data_df, image_urls_df, fields_df
 
+def get_related_skus(sku_col_name: str, supplier_data_df: pd.DataFrame) -> Tuple[Dict, Dict]:
+    """
+    Use common SKU-model pattern recognition rules to group related SKUs together
+    """
+
+    sku_to_model = {}
+    model_to_skus = {}
+
+    for sku in supplier_data_df[sku_col_name]:
+        model = sku.split('-')[0]
+        match = re.match('([A-Za-z]+[0-9]+)', model)
+        if match is not None:
+            model = match.group()
+
+        if model != sku:
+            sku_to_model[sku] = model
+
+            if model not in  model_to_skus.keys():
+                model_to_skus[model] = [sku]
+            else:
+                model_to_skus[model].append(sku)
+
+    return sku_to_model, model_to_skus
+
 def sequence_batches(supplier_data_df: pd.DataFrame, fields_df: pd.DataFrame) -> List[Dict]:
     """
     Sequence batches into groups based on process order numbers
@@ -71,7 +97,7 @@ def sequence_batches(supplier_data_df: pd.DataFrame, fields_df: pd.DataFrame) ->
 
     return sku_col_name, process_order_numbers
 
-def generate_batch_payloads(sku_col_name: str, process_order_number: int, batch_results_path: str, endpoint: str, model: str,
+def generate_batch_payloads(process_order_number: int, batch_results_path: str, endpoint: str, model: str, sku_col_name: str, sku_to_model: Dict, model_to_skus: Dict,
                             supplier_data_df: pd.DataFrame, image_urls_df: pd.DataFrame, fields_df: pd.DataFrame) -> List[Dict]:
     """
     Generate a list of request payloads for each SKU in the supplier CSV with product images.
@@ -101,6 +127,14 @@ def generate_batch_payloads(sku_col_name: str, process_order_number: int, batch_
             variant_img_url = image_urls_df[image_urls_df['sku'] == sku]['image/url']
             product_img_urls = image_urls_df[image_urls_df['__parentId'] == product_id]['image/url'].drop_duplicates()
 
+            # Get related SKUs data if possible
+            related_skus_data = {}
+            
+            if sku in sku_to_model:
+                model = sku_to_model[sku]
+                related_skus = model_to_skus[model]
+                related_skus_data = supplier_data_df[supplier_data_df[sku_col_name].isin(related_skus)].to_dict()
+
             # Get fields to extract for the SKU, dropping fields that are not relevant to its product type and failed dependency conditions
             fields_to_extract = fields_df[fields_df['Process Order Number'] == process_order_number].dropna(subset=[product_type])
 
@@ -112,7 +146,7 @@ def generate_batch_payloads(sku_col_name: str, process_order_number: int, batch_
                         fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
 
             # Generate the request payload for this SKU
-            system_instructions, user_prompt = build_prompt(sku, product_type, product_vendor, supplier_row_data, fields_to_extract)
+            system_instructions, user_prompt = build_prompt(sku, product_type, product_vendor, supplier_row_data, related_skus_data, fields_to_extract)
             schema = build_schema(fields_to_extract)
             payload = generate_single_payload(variant_id, endpoint, model, system_instructions, user_prompt, variant_img_url, product_img_urls, schema)
 
@@ -141,7 +175,7 @@ def get_dependency_results(fields_df: pd.DataFrame, batch_results_path: str) -> 
 
     return past_results
 
-def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_data: Dict[str, str], fields_to_extract: pd.DataFrame) -> Tuple[str, str]:
+def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_data: Dict, related_skus_data: Dict, fields_to_extract: pd.DataFrame) -> Tuple[str, str]:
     """
     Compose system instructions and user prompt for a single SKU.
     """
@@ -149,37 +183,48 @@ def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_
     system_instructions = (
         "You are an expert product data analyst for a large home goods retailer like Wayfair. "
         "Your job is to extract standardized field values from supplier spreadsheet data, product images, and crawled website data. "
-        "The user will provide supplier spreadsheet data as a stringified JSON object, while the images will be provided as URLs. "
-        "All key-value pairs in the JSON should be carefully read and considered when evaluating each field. "
-        "You will also perform web search on the suppliers' website to find additional data and verify suspicions for each SKU. "
-        "Specific instructions and rules will be provided for evaluating certain fields - follow them closely. "
-        "Each field will also need to conform to their specified data type. "
-        "Never guess or create dimension values on your own based on visual appearance. "
-        "However, it is acceptable to reuse a dimension value from supplier data if the label clearly corresponds to the intended field. "
-        "For example, 'Clearance Height' value of a coffee table may often be used for the 'Leg Dimension' field. "
-        "You will sometimes be provided with supplier data for related SKUs along with the main SKU data. "
-        "The related SKUs are similar to the main SKU in dimension and design, but can differ in color or material. "
-        "It can sometimes include usable data that are missing from the main SKU's data. "
-        "Since the related SKUs should share the same dimensions as the main SKU, use the dimension that appear the most often if there's an anomaly. "
-        "The supplier data can sometimes be completely wrong due to typos - check all data sources available to you to make your decisions. "
-        "When you're not sure and you believe estimating can lead to customer complaints, just leave the field null. "
-        "The order of data checking should be supplier data, images, crawled website data, and then related SKU data. "
-        "Return a structured JSON named 'fields_extracted_response', abiding by the output schema specified in the request payload. "
-        "If any field could not be extracted for whatever reason, just assign its value as null. "
-        "A null value must still be accompanied by a confidence level (e.g., the system is highly confident that no valid data was available). "
-        "A null value must also be accompanied by reasoning that explains why the value was null (e.g., insufficient evidence)."
+        "The user will provide supplier data as a stringified JSON object, and product images as a list of image URLs. "
+        "All key-value pairs in the JSON should be carefully examined when evaluating each field. "
+        "Specific instructions and rules may be provided for certain fields—follow these exactly. "
+        "Each field will be labeled as either 'Required' or 'Optional'. "
+        "'Required' fields must never be left null unless no reliable data exists — in such cases, include an appropriate warning. "
+        "'Optional' fields may be left null if no trustworthy value can be extracted. "
+        "Images are provided at the product level and may include variants with different sizes from the main SKU. "
+        "Never guess or create new dimension values based solely on image appearances. "
+        "However, you may reuse dimension values from supplier data if the label clearly maps to the intended field. "
+        "For example, the 'Clearance Height' of a coffee table may be reused for the 'Leg Dimension' field if applicable. "
+        "For web search, make sure to only use data you're able to find on the suppliers' official website (which often has the supplier's name in the URL). "
+        "Supplier data for related SKUs may also be provided. These are similar in design to the main SKU but may differ in size, material, or color. "
+        "You may use data from related SKUs to fill gaps in the main SKU. "
+        "If a minority of related SKUs have dimension values that differ slightly from the majority, normalize to the most common value. "
+        "Be aware that supplier data may include typos or errors. Cross-check all data sources to validate your decision. "
+        "When a value cannot be determined confidently and estimation could result in customer complaints, return null. "
+        "The priority order for sourcing data should be: (1) supplier data, (2) images, (3) website data (if provided), (4) related SKU data. "
+        "Return a structured JSON object named 'fields_extracted_response' that complies with the schema provided in the request payload. "
+        "Each field must be accompanied by a confidence rating ('Low', 'Medium', or 'High'), even if null. "
+        "Additionally, include a clear reasoning explaining the extracted value or why the field is null."
     )
 
     user_prompt = (
-        f"Review the following data for SKU {sku} from our supplier {product_vendor} in stringified JSON format: "
+        f"Review the following data for SKU {sku} (in stringified JSON format) from our supplier {product_vendor}: "
         f"{supplier_row_data}"
-        "Try to match these data to the corresponding fields below, following their notes/instructions (if any): "
+    )
+
+    if related_skus_data:
+        user_prompt += (
+            f"SKU {sku} also has related SKUs that share the same design and features, but with potentially different material, color, and size."
+            "Consider the following data (also in stringified JSON format) of the related SKUs to potentially fill gaps and fix inconsistencies/errors: "
+            f"{related_skus_data}"
+        )
+
+    user_prompt += (
+        "Try to match these data to the corresponding fields below, following their specific notes/instructions if available: "
         "\n"
     )
+
     fields = fields_to_extract['Field']
 
     for field in fields:
-        shopify_resource = fields_to_extract[fields_to_extract['Field'] == field]['Resource']       # To-do: check related SKU data if field is Product resource
         notes = fields_to_extract[fields_to_extract['Field'] == field]['Notes']
         requirement = fields_to_extract[fields_to_extract['Field'] == field][product_type]
         is_required = True if requirement == 'Required' else False
@@ -270,6 +315,7 @@ def generate_single_payload(variant_id: str, endpoint: str, model: str, system_i
         'url': endpoint,
         'body': {
             'model': model,
+            'tools': [{ "type": "web_search_preview" }],
             'instructions': system_instructions,
             'input': [
                 {
