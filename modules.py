@@ -1,14 +1,14 @@
 import openai
 import time
 import json
-from typing import List, Tuple, Dict, Optional
-from enum import Enum
-import pandas as pd
-from dotenv import load_dotenv
 import os
 import sys
+import pandas as pd
+from dotenv import load_dotenv
 from pathlib import Path
+from typing import List, Tuple, Dict
 from utils import print_options
+from fragments import object_schema_reference
 
 def init():
     load_dotenv()
@@ -28,14 +28,14 @@ def get_source_paths() -> List[str]:
     
     source_dir = Path("./input")
     data_files = [file for file in source_dir.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx']
-    required_files = {'supplier data': None, 'image URLs': None, 'fields to extract': None}
+    required_files = {'supplier data': None, 'Shopify data': None, 'fields to extract': None}
 
     if len(data_files) < 3:
         print(("There needs to be 3 files in the ./source directory."
                "1. CSV/XLSX product data from a supplier."
-               "2. CSV/XLSX with list of SKUs and hosted image URLs."
+               "2. CSV/XLSX Shopify data including image URLs."
                "3. CSV/XLSX with list of fields to extract."
-               "Refer to the README.md for required formatting for each file."))
+               "Refer to the README.md for detailed formatting required for each file."))
         sys.exit()
     else:
         for required_file in required_files:
@@ -45,16 +45,23 @@ def get_source_paths() -> List[str]:
 
     return required_files.values()
 
-def generate_batch_payloads(supplier_data_path: Path, image_urls_path: Path, fields_path: Path) -> List[Dict]:
+def get_input_dfs(supplier_data_path: Path, image_urls_path: Path, fields_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Generate a list of request payloads for each SKU in the supplier CSV with product images.
+    Read XLSX or XSV inputs files and return dataframes
     """
 
     supplier_data_df = pd.read_csv(supplier_data_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(supplier_data_path)
     image_urls_df = pd.read_csv(image_urls_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(image_urls_path)
     fields_df = pd.read_csv(fields_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(fields_path)
-    process_order = sorted(fields_df['Process Order'].dropna().unique())
-    payloads = []
+
+    return supplier_data_df, image_urls_df, fields_df
+
+def sequence_batches(supplier_data_df: pd.DataFrame, fields_df: pd.DataFrame) -> List[Dict]:
+    """
+    Sequence batches into groups based on process order numbers
+    """
+    
+    process_order_numbers = sorted(fields_df['Process Order Number'].dropna().unique())
 
     # Get column name representing column data for SKU from the supplier data CSV/XLSX
     headers = list(supplier_data_df)
@@ -62,37 +69,79 @@ def generate_batch_payloads(supplier_data_path: Path, image_urls_path: Path, fie
     sku_idx = int(input(f"Which name represents column data for SKU?: "))
     sku_col_name = headers[sku_idx]
 
-    # Begin generating batch payloads for each SKU/row, processed in sequence based on shared context fragments
-    for order_number in process_order:
-        fields_segment: pd.Series = fields_df[fields_df['Process Order'] == order_number]
+    return sku_col_name, process_order_numbers
 
-        # Loop through each row of supplier data, processing only SKUs that have hosted product images
-        for _, row in supplier_data_df.iterrows():
-            sku = str(row[sku_col_name]).strip()
+def generate_batch_payloads(sku_col_name: str, process_order_number: int, batch_results_path: str, endpoint: str, model: str,
+                            supplier_data_df: pd.DataFrame, image_urls_df: pd.DataFrame, fields_df: pd.DataFrame) -> List[Dict]:
+    """
+    Generate a list of request payloads for each SKU in the supplier CSV with product images.
+    """
 
-            if sku in image_urls_df['sku']:
-                product_id: str = image_urls_df[image_urls_df['sku'] == sku]['__parentId']
-                product_type: str = image_urls_df[image_urls_df['id'] == product_id]['productType']
+    payloads = []
+    dependency_results = {}
 
-                # Get all the supplier product data for this SKU, dropping any blank values
-                supplier_row_data = row.dropna().to_dict()
+    # If processing order numbers 2 or greater, read past results output to fetch dependency field booleans for each SKU
+    if process_order_number > 1:
+        dependency_results = get_dependency_results(fields_df, batch_results_path)
 
-                # Get the featured image URL for the product variant (NaN if not available) and image URLs for the product
-                variant_img_url = image_urls_df[image_urls_df['sku'] == sku]['image/url']
-                product_img_urls = image_urls_df[image_urls_df['__parentId'] == product_id]['image/url'].drop_duplicates()
+    # Loop through each row of supplier data, processing only SKUs that have hosted product images
+    for _, row in supplier_data_df.iterrows():
+        sku = str(row[sku_col_name]).strip()
 
-                # Get fields to extract for the SKU based on its product type
-                fields_to_extract = fields_segment.dropna(subset=[product_type])
+        if sku in image_urls_df['sku']:
+            variant_id = image_urls_df[image_urls_df['sku'] == sku]['id']
+            product_id = image_urls_df[image_urls_df['sku'] == sku]['__parentId']
+            product_type = image_urls_df[image_urls_df['id'] == product_id]['productType']
+            product_vendor = image_urls_df[image_urls_df['id'] == product_id]['vendor']
 
-                system_instructions, user_prompt = build_prompt(sku, product_type, supplier_row_data, fields_to_extract)
-                schema = build_schema(sku, fields_to_extract)
-                payload = generate_single_payload(system_instructions, user_prompt, variant_img_url, product_img_urls, schema)
+            # Get all the supplier product data for this SKU, dropping any blank values
+            supplier_row_data = row.dropna().to_dict()
 
-                payloads.append(payload)
+            # Get the featured image URL for the product variant (NaN if not available) and image URLs for the product
+            variant_img_url = image_urls_df[image_urls_df['sku'] == sku]['image/url']
+            product_img_urls = image_urls_df[image_urls_df['__parentId'] == product_id]['image/url'].drop_duplicates()
+
+            # Get fields to extract for the SKU, dropping fields that are not relevant to its product type and failed dependency conditions
+            fields_to_extract = fields_df[fields_df['Process Order Number'] == process_order_number].dropna(subset=[product_type])
+
+            if dependency_results:
+                dependency_fields = fields_to_extract['Dependency'].dropna().unique()
+
+                for dependency_field in dependency_fields:
+                    if dependency_results[variant_id][dependency_field] is not True:
+                        fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
+
+            # Generate the request payload for this SKU
+            system_instructions, user_prompt = build_prompt(sku, product_type, product_vendor, supplier_row_data, fields_to_extract)
+            schema = build_schema(fields_to_extract)
+            payload = generate_single_payload(variant_id, endpoint, model, system_instructions, user_prompt, variant_img_url, product_img_urls, schema)
+
+            payloads.append(payload)
 
     return payloads
 
-def build_prompt(sku: str, product_type: str, supplier_row_data: Dict[str, str], fields_to_extract: pd.DataFrame) -> Tuple[str, str]:
+def get_dependency_results(fields_df: pd.DataFrame, batch_results_path: str) -> Dict:
+    past_results = {}
+    dependency_fields = fields_df['Dependency'].dropna().unique()
+
+    with open(batch_results_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():  # Skip empty lines
+                try:
+                    line = json.loads(line)
+                    variant_id = line['custom_id']
+                    results = line['body']['messages'][1]['content']
+                    
+                    for dependency_field in dependency_fields:
+                        result = results[dependency_field]['value']
+                        past_results[variant_id] = {dependency_field: result}
+
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
+
+    return past_results
+
+def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_data: Dict[str, str], fields_to_extract: pd.DataFrame) -> Tuple[str, str]:
     """
     Compose system instructions and user prompt for a single SKU.
     """
@@ -122,7 +171,7 @@ def build_prompt(sku: str, product_type: str, supplier_row_data: Dict[str, str],
     )
 
     user_prompt = (
-        f"Review the following data for SKU {sku} from our supplier in stringified JSON format: "
+        f"Review the following data for SKU {sku} from our supplier {product_vendor} in stringified JSON format: "
         f"{supplier_row_data}"
         "Try to match these data to the corresponding fields below, following their notes/instructions (if any): "
         "\n"
@@ -130,7 +179,6 @@ def build_prompt(sku: str, product_type: str, supplier_row_data: Dict[str, str],
     fields = fields_to_extract['Field']
 
     for field in fields:
-        dependent_field = fields_to_extract[fields_to_extract['Field'] == field]['Dependency']      # To-do: check past output on conditional field truthiness
         shopify_resource = fields_to_extract[fields_to_extract['Field'] == field]['Resource']       # To-do: check related SKU data if field is Product resource
         notes = fields_to_extract[fields_to_extract['Field'] == field]['Notes']
         requirement = fields_to_extract[fields_to_extract['Field'] == field][product_type]
@@ -147,68 +195,13 @@ def build_prompt(sku: str, product_type: str, supplier_row_data: Dict[str, str],
 
     return system_instructions, user_prompt
 
-def build_schema(sku: str, fields_to_extract: pd.DataFrame) -> Dict:
+def build_schema(fields_to_extract: pd.DataFrame) -> Dict:
     """
     Compose custom schema for the structured JSON output tailored to a payload's extracted fields.
     """
 
     fields = fields_to_extract['Field']
     schema_properties = {}
-
-    single_dimension_schema = {
-        'type': 'object',
-        'properties': {
-            'unit': {'enum': ['INCHES', 'FEET']},
-            'value': {'type': 'number', 'minimum': 0}
-        },
-        'required': ['unit', 'value'],
-        'additionalProperties': False
-    }
-    dimension_schema = {
-        'type': 'object',
-        'properties': {
-            'width': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True},
-            'depth': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True},
-            'height': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True}
-        },
-        'minProperties': 2,
-        'additionalProperties': False
-    }
-    dimension_sets_schema = {
-        'type': 'object',
-        'properties': {
-            'name': {'type': 'string', 'pattern': '\\S+'},
-            'dimension': {'type': 'array', 'items': dimension_schema, 'minItems': 1, 'uniqueItems': True}
-        },
-        'required': ['name', 'dimension'],
-        'additionalProperties': False
-    }
-    weight_schema = {
-        'type': 'object',
-        'properties': {
-            'unit': {'enum': ['OUNCE', 'POUND']},
-            'value': {'type': 'number', 'minimum': 0}
-        },
-        'required': ['unit', 'value'],
-        'additionalProperties': False
-    }
-    package_measurement_schema = {
-        'type': 'object',
-        'properties': {
-            'dimension': dimension_schema,
-            'weight': weight_schema
-        },
-        'required': ['dimension', 'weight'],
-        'additionalProperties': False
-    }
-    object_schema_reference = {
-        'dimension_sets': dimension_sets_schema,
-        'dimension': dimension_schema,
-        'height': single_dimension_schema,
-        'length': single_dimension_schema,
-        'weight': weight_schema,
-        'package_measurement': package_measurement_schema
-    }
 
     for field in fields:
         field_value_structure = {}
@@ -243,11 +236,12 @@ def build_schema(sku: str, fields_to_extract: pd.DataFrame) -> Dict:
             }
         }
 
-    schema = {'type': 'object', 'sku': sku, 'properties': schema_properties}
+    schema = {'type': 'object', 'properties': schema_properties}
 
     return schema
 
-def generate_single_payload(system_instructions: str, user_prompt: str, variant_img_url: str, product_img_urls: List[str], schema: Dict) -> Dict:
+def generate_single_payload(variant_id: str, endpoint: str, model: str, system_instructions: str, user_prompt: str, 
+                            variant_img_url: str, product_img_urls: List[str], schema: Dict) -> Dict:
     """
     Construct a single structured API payload for an SKU.
     """
@@ -271,19 +265,25 @@ def generate_single_payload(system_instructions: str, user_prompt: str, variant_
     content = [{'type': 'input_text', 'text': user_prompt}] + input_img_json_objects
 
     payload = {
-        'instructions': system_instructions,
-        'input': [
-            {
-                'role': 'user',
-                'content': content
-            }
-        ],
-        'text': {
-            'format': {
-                'type': 'json_schema',
-                'name': 'fields_extracted_response',
-                'strict': True,
-                'schema': schema
+        'custom_id': variant_id,
+        'method': 'POST',
+        'url': endpoint,
+        'body': {
+            'model': model,
+            'instructions': system_instructions,
+            'input': [
+                {
+                    'role': 'user',
+                    'content': content
+                }
+            ],
+            'text': {
+                'format': {
+                    'type': 'json_schema',
+                    'name': 'fields_extracted_response',
+                    'strict': True,
+                    'schema': schema
+                }
             }
         }
     }
