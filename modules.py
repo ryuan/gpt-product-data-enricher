@@ -49,7 +49,7 @@ def get_source_paths() -> List[str]:
 
 def get_input_dfs(supplier_data_path: Path, image_urls_path: Path, fields_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Read XLSX or XSV inputs files and return dataframes
+    Read XLSX or CSV inputs files and return dataframes
     """
 
     supplier_data_df = pd.read_csv(supplier_data_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(supplier_data_path)
@@ -97,18 +97,13 @@ def sequence_batches(supplier_data_df: pd.DataFrame, fields_df: pd.DataFrame) ->
 
     return sku_col_name, process_order_numbers
 
-def generate_batch_payloads(process_order_number: int, batch_results_path: str, endpoint: str, model: str, sku_col_name: str, sku_to_model: Dict, model_to_skus: Dict,
+def generate_batch_payloads(process_order_number: int, dependency_results: Dict, endpoint: str, model: str, sku_col_name: str, sku_to_model: Dict, model_to_skus: Dict,
                             supplier_data_df: pd.DataFrame, image_urls_df: pd.DataFrame, fields_df: pd.DataFrame) -> List[Dict]:
     """
     Generate a list of request payloads for each SKU in the supplier CSV with product images.
     """
 
     payloads = []
-    dependency_results = {}
-
-    # If processing order numbers 2 or greater, read past results output to fetch dependency field booleans for each SKU
-    if process_order_number > 1:
-        dependency_results = get_dependency_results(fields_df, batch_results_path)
 
     # Loop through each row of supplier data, processing only SKUs that have hosted product images
     for _, row in supplier_data_df.iterrows():
@@ -185,14 +180,14 @@ def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_
         "Your job is to extract standardized field values from supplier spreadsheet data, product images, and crawled website data. "
         "The user will provide supplier data as a stringified JSON object, and product images as a list of image URLs. "
         "All key-value pairs in the JSON should be carefully examined when evaluating each field. "
-        "Specific instructions and rules may be provided for certain fields—follow these exactly. "
+        "Specific instructions and rules may be provided for certain fields — follow these exactly. "
         "Each field will be labeled as either 'Required' or 'Optional'. "
         "'Required' fields must never be left null unless no reliable data exists — in such cases, include an appropriate warning. "
         "'Optional' fields may be left null if no trustworthy value can be extracted. "
         "Images are provided at the product level and may include variants with different sizes from the main SKU. "
         "Never guess or create new dimension values based solely on image appearances. "
         "However, you may reuse dimension values from supplier data if the label clearly maps to the intended field. "
-        "For example, the 'Clearance Height' of a coffee table may be reused for the 'Leg Dimension' field if applicable. "
+        "For example, the 'Clearance Height' of a coffee table may be used for the 'Leg Dimension' field if applicable. "
         "For web search, make sure to only use data you're able to find on the suppliers' official website (which often has the supplier's name in the URL). "
         "Supplier data for related SKUs may also be provided. These are similar in design to the main SKU but may differ in size, material, or color. "
         "You may use data from related SKUs to fill gaps in the main SKU. "
