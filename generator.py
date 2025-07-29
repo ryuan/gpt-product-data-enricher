@@ -145,7 +145,7 @@ class PayloadsGenerator:
         Compose custom schema for the structured JSON output tailored to a payload's extracted fields.
         """
 
-        fields = fields_to_extract['Field']
+        fields = fields_to_extract['Field'].to_list()
         schema_properties = {}
 
         for field in fields:
