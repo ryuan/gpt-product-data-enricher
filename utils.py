@@ -4,6 +4,7 @@ import json
 import time
 import sys
 
+
 class BatchManager:
     def __init__(self, client: OpenAI, endpoint: str, model: str, batch_payloads_path: str, batch_results_path: str):
         self.client = client
