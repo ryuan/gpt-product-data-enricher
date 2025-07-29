@@ -1,3 +1,4 @@
+from openai import OpenAI
 import openai
 import time
 import json
@@ -10,18 +11,22 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 from utils import print_options
 from fragments import object_schema_reference
+from utils import BatchManager
 
 
-def init():
+def init() -> OpenAI:
     load_dotenv()
+    client = OpenAI()
 
     if "OPENAI_API_KEY" in os.environ:
-        openai.api_key = os.getenv('OPENAI_API_KEY')
+        client.api_key = os.getenv('OPENAI_API_KEY')
     else:
         print(("OPENAI_API_KEY does not exist in the local or global environment."
                "Generate an OpenAI API key, then export it as an environment variable in terminal via:"
                "export OPENAI_API_KEY='your_api_key_here'"))
         sys.exit()
+
+    return client
 
 def get_source_paths() -> List[str]:
     """
@@ -53,8 +58,8 @@ def get_input_dfs(supplier_data_path: Path, image_urls_path: Path, fields_path: 
     """
 
     supplier_data_df = pd.read_csv(supplier_data_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(supplier_data_path)
-    image_urls_df = pd.read_csv(image_urls_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(image_urls_path)
-    fields_df = pd.read_csv(fields_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(fields_path)
+    image_urls_df = pd.read_csv(image_urls_path) if image_urls_path.suffix == '.csv' else pd.read_excel(image_urls_path)
+    fields_df = pd.read_csv(fields_path) if fields_path.suffix == '.csv' else pd.read_excel(fields_path)
 
     return supplier_data_df, image_urls_df, fields_df
 
@@ -97,30 +102,28 @@ def sequence_batches(supplier_data_df: pd.DataFrame, fields_df: pd.DataFrame) ->
 
     return sku_col_name, process_order_numbers
 
-def generate_batch_payloads(process_order_number: int, dependency_results: Dict, endpoint: str, model: str, sku_col_name: str, sku_to_model: Dict, model_to_skus: Dict,
-                            supplier_data_df: pd.DataFrame, image_urls_df: pd.DataFrame, fields_df: pd.DataFrame) -> List[Dict]:
+def generate_batch_payloads(process_order_number: int, dependency_results: Dict, batch_manager: BatchManager, sku_col_name: str, sku_to_model: Dict, model_to_skus: Dict,
+                            supplier_data_df: pd.DataFrame, image_urls_df: pd.DataFrame, fields_df: pd.DataFrame):
     """
     Generate a list of request payloads for each SKU in the supplier CSV with product images.
     """
-
-    payloads = []
 
     # Loop through each row of supplier data, processing only SKUs that have hosted product images
     for _, row in supplier_data_df.iterrows():
         sku = str(row[sku_col_name]).strip()
 
-        if sku in image_urls_df['sku']:
-            variant_id = image_urls_df[image_urls_df['sku'] == sku]['id']
-            product_id = image_urls_df[image_urls_df['sku'] == sku]['__parentId']
-            product_type = image_urls_df[image_urls_df['id'] == product_id]['productType']
-            product_vendor = image_urls_df[image_urls_df['id'] == product_id]['vendor']
+        if sku in image_urls_df['sku'].to_list():
+            variant_id = image_urls_df[image_urls_df['sku'] == sku]['id'].iloc[0]
+            product_id = image_urls_df[image_urls_df['sku'] == sku]['__parentId'].iloc[0]
+            product_type = image_urls_df[image_urls_df['id'] == product_id]['productType'].iloc[0]
+            product_vendor = image_urls_df[image_urls_df['id'] == product_id]['vendor'].iloc[0]
 
             # Get all the supplier product data for this SKU, dropping any blank values
             supplier_row_data = row.dropna().to_dict()
 
             # Get the featured image URL for the product variant (NaN if not available) and image URLs for the product
-            variant_img_url = image_urls_df[image_urls_df['sku'] == sku]['image/url']
-            product_img_urls = image_urls_df[image_urls_df['__parentId'] == product_id]['image/url'].drop_duplicates()
+            variant_img_url = image_urls_df[image_urls_df['sku'] == sku]['image/url'].iloc[0]
+            product_img_urls = image_urls_df[image_urls_df['__parentId'] == product_id]['image/url'].drop_duplicates().to_list()
 
             # Get related SKUs data if possible
             related_skus_data = {}
@@ -134,7 +137,7 @@ def generate_batch_payloads(process_order_number: int, dependency_results: Dict,
             fields_to_extract = fields_df[fields_df['Process Order Number'] == process_order_number].dropna(subset=[product_type])
 
             if dependency_results:
-                dependency_fields = fields_to_extract['Dependency'].dropna().unique()
+                dependency_fields = fields_to_extract['Dependency'].dropna().unique().to_list()
 
                 for dependency_field in dependency_fields:
                     if dependency_results[variant_id][dependency_field] is not True:
@@ -143,32 +146,10 @@ def generate_batch_payloads(process_order_number: int, dependency_results: Dict,
             # Generate the request payload for this SKU
             system_instructions, user_prompt = build_prompt(sku, product_type, product_vendor, supplier_row_data, related_skus_data, fields_to_extract)
             schema = build_schema(fields_to_extract)
-            payload = generate_single_payload(variant_id, endpoint, model, system_instructions, user_prompt, variant_img_url, product_img_urls, schema)
+            payload = generate_single_payload(variant_id, batch_manager, system_instructions, user_prompt, variant_img_url, product_img_urls, schema)
 
-            payloads.append(payload)
-
-    return payloads
-
-def get_dependency_results(fields_df: pd.DataFrame, batch_results_path: str) -> Dict:
-    past_results = {}
-    dependency_fields = fields_df['Dependency'].dropna().unique()
-
-    with open(batch_results_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():  # Skip empty lines
-                try:
-                    line = json.loads(line)
-                    variant_id = line['custom_id']
-                    results = line['body']['messages'][1]['content']
-                    
-                    for dependency_field in dependency_fields:
-                        result = results[dependency_field]['value']
-                        past_results[variant_id] = {dependency_field: result}
-
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
-
-    return past_results
+            # Write final payload for this SKU to batch payloads JSONL file
+            batch_manager.write(payload)
 
 def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_data: Dict, related_skus_data: Dict, fields_to_extract: pd.DataFrame) -> Tuple[str, str]:
     """
@@ -217,16 +198,16 @@ def build_prompt(sku: str, product_type: str, product_vendor: str, supplier_row_
         "\n"
     )
 
-    fields = fields_to_extract['Field']
+    fields = fields_to_extract['Field'].to_list()
 
     for field in fields:
-        notes = fields_to_extract[fields_to_extract['Field'] == field]['Notes']
-        requirement = fields_to_extract[fields_to_extract['Field'] == field][product_type]
+        notes = fields_to_extract[fields_to_extract['Field'] == field]['Notes'].values
+        requirement = fields_to_extract[fields_to_extract['Field'] == field][product_type].values
         is_required = True if requirement == 'Required' else False
 
         prompt_fragment = (
             f"Field Name: {field}"
-            f"Notes/Instructions: {notes if notes else "None"}"
+            f"Notes/Instructions: {notes if notes else 'None'}"
             f"Is Field Required?: {is_required}"
             "\n"
         )
@@ -245,10 +226,10 @@ def build_schema(fields_to_extract: pd.DataFrame) -> Dict:
 
     for field in fields:
         field_value_structure = {}
-        field_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Type']
-        field_enum_values = fields_to_extract[fields_to_extract['Field'] == field]['JSON Enum Values']
-        field_array_items = fields_to_extract[fields_to_extract['Field'] == field]['JSON Array Items']
-        field_object_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Object Type']
+        field_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Type'].values
+        field_enum_values = fields_to_extract[fields_to_extract['Field'] == field]['JSON Enum Values'].values
+        field_array_items = fields_to_extract[fields_to_extract['Field'] == field]['JSON Array Items'].values
+        field_object_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Object Type'].values
 
         if field_type in ['string', 'number', 'boolean']:
             field_value_structure['type'] = field_type
@@ -280,7 +261,7 @@ def build_schema(fields_to_extract: pd.DataFrame) -> Dict:
 
     return schema
 
-def generate_single_payload(variant_id: str, endpoint: str, model: str, system_instructions: str, user_prompt: str, 
+def generate_single_payload(variant_id: str, batch_manager: BatchManager, system_instructions: str, user_prompt: str, 
                             variant_img_url: str, product_img_urls: List[str], schema: Dict) -> Dict:
     """
     Construct a single structured API payload for an SKU.
@@ -307,9 +288,9 @@ def generate_single_payload(variant_id: str, endpoint: str, model: str, system_i
     payload = {
         'custom_id': variant_id,
         'method': 'POST',
-        'url': endpoint,
+        'url': batch_manager.endpoint,
         'body': {
-            'model': model,
+            'model': batch_manager.model,
             'tools': [{ "type": "web_search_preview" }],
             'instructions': system_instructions,
             'input': [
@@ -331,66 +312,23 @@ def generate_single_payload(variant_id: str, endpoint: str, model: str, system_i
 
     return payload
 
-def export_batch_to_jsonl(payloads: List[Dict], output_path: str):
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for task in payloads:
-            json.dump(task, f)
-            f.write('\n')
+def get_dependency_results(fields_df: pd.DataFrame, batch_manager: BatchManager) -> Dict:
+    dependency_results = {}
+    dependency_fields = fields_df['Dependency'].dropna().unique()
 
-def upload_batch_payloads(output_path: str) -> Dict:
-    """
-    Upload batch payloads JSONL file to OpenAI servers, returning the file upload confirmation object
-    """
-    file = openai.files.create(
-        file=open(output_path, 'rb'),
-        purpose='batch'
-    )
+    with open(batch_manager.batch_results_path, 'r', encoding='ascii') as f:
+        for line in f:
+            if line.strip():  # Skip empty lines
+                try:
+                    line = json.loads(line)
+                    variant_id = line['custom_id']
+                    results = line['body']['messages'][1]['content']
+                    
+                    for dependency_field in dependency_fields:
+                        result = results[dependency_field]['value']
+                        dependency_results[variant_id] = {dependency_field: result}
 
-    return file
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
 
-def create_batch(file: Dict, endpoint: str, model: str) -> Dict:
-    """
-    Creates and executes a batch from an uploaded file of requests, returning the batch status object
-    """
-    batch = openai.batches.create(
-        input_file_id=file.id,
-        endpoint=endpoint,
-        completion_window="24h",
-        model=model,
-        metadata={"task": "product_field_enrichment"}
-    )
-
-    return batch
-
-def poll_batch_until_complete(batch_id: str, poll_interval: int = 30) -> Dict:
-    """
-    Poll the batch job until it reaches a terminal state.
-    """
-    print(f"Polling batch job {batch_id} every {poll_interval} seconds...")
-    while True:
-        batch_status = openai.batches.retrieve(batch_id)
-        status = batch_status.status
-        print(f"Status: {status}")
-        if status in ["completed", "failed", "cancelled", "expired"]:
-            return batch_status
-        time.sleep(poll_interval)
-
-def download_batch_result(batch_status: Dict, output_path: str):
-    """
-    Download the results of the completed batch job.
-    """
-    if batch_status.status != "completed":
-        print(f"Batch job did not complete successfully. Status: {batch_status.status}")
-        return
-
-    result_url = batch_status.output_file.url
-    print(f"Downloading result from: {result_url}")
-
-    import requests
-    response = requests.get(result_url)
-    if response.status_code == 200:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(response.text)
-        print(f"Results saved to {output_path}")
-    else:
-        print(f"Failed to download result: HTTP {response.status_code}")
+    return dependency_results
