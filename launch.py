@@ -18,7 +18,7 @@ def main():
     model = 'gpt-4o'
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
-    for process_order_number in process_order_numbers:
+    for process_order_number in [1]:
         batch_payloads_path = f'output/batch_payloads_{process_order_number}.jsonl'
         batch_results_path = f'output/batch_results_{process_order_number}.jsonl'
         batch_manager = BatchManager(client, endpoint, model, batch_payloads_path, batch_results_path)
@@ -33,6 +33,10 @@ def main():
         # Poll status of batch execution, downloading the output JSONL results upon completion
         batch_manager.poll_batch_until_complete()
         batch_manager.download_batch_results()
+
+        # If this is the first process order sequence, read the results output to fetch dependency field booleans for each processed SKU
+        if process_order_number == 1:
+            payloads_generator.set_dependency_results()
 
 if __name__ == "__main__":
     main()

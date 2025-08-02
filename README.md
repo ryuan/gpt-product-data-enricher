@@ -6,7 +6,7 @@ The program ingests data from 3 sources - tabular CSV data from suppliers, produ
 
 The program leverages the Batch API for cost efficiency, as well as the new Responses API endpoint to take advantage of capabilities like ascynchronous Web Search to fetch even more data for each payload processed within a batch. Currently supports Shopify only (via GraphQL query results).
 
-Featuring sequential data ingestion and context-based batch processing, the program aims to transform tabular data into structured results that maintain reasoning fidelity and deep logic while reducing hallucinations and cognitive load.
+Featuring context-based, sequential batch processing, the program aims to transform tabular data into structured results that maintain reasoning fidelity and deep logic while reducing hallucinations and cognitive load.
 
 ## To-Do's
 

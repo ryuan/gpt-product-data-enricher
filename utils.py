@@ -53,7 +53,8 @@ def get_input_dfs(supplier_data_path: Path, store_data_path: Path, fields_data_p
     Read XLSX or CSV inputs files and return dataframes
     """
 
-    supplier_data_df = clean_df(pd.read_csv(supplier_data_path) if supplier_data_path.suffix == '.csv' else pd.read_excel(supplier_data_path))
+    # Note that only for the supplier data, we read every cells as a string (dtype=object) to prevent any changes
+    supplier_data_df = clean_df(pd.read_csv(supplier_data_path, dtype=object) if supplier_data_path.suffix == '.csv' else pd.read_excel(supplier_data_path, dtype=object))
     store_data_df = clean_df(pd.read_csv(store_data_path) if store_data_path.suffix == '.csv' else pd.read_excel(store_data_path))
     fields_data_df = clean_df(pd.read_csv(fields_data_path) if fields_data_path.suffix == '.csv' else pd.read_excel(fields_data_path))
 
@@ -104,7 +105,7 @@ def validate_fields_data_df(fields_data_path: Path, fields_data_df: pd.DataFrame
 
     # Check if all product fields and variant fields are not mixed together in any process order
     resource_per_process = fields_data_df.groupby('Process Order Number')['Resource'].nunique()
-    invalid_process_order_numbers = resource_per_process[resource_per_process > 1].to_list()
+    invalid_process_order_numbers = resource_per_process[resource_per_process > 1].drop_duplicates().to_list()
     
     if invalid_process_order_numbers:
         print(f"These process order numbers are batching fields that belong to products and variants: {invalid_process_order_numbers}")
@@ -135,7 +136,7 @@ def get_product_ids_skus(store_data_df: pd.DataFrame) -> Dict:
     """
     
     store_skus_df = store_data_df[store_data_df['sku'].notna()]
-    product_skus = store_skus_df.groupby('parent_id')['sku'].apply(list).to_dict()
+    product_skus = store_skus_df.groupby('__parentId')['sku'].apply(list).to_dict()
     return product_skus
 
 ### General utility functions
@@ -144,6 +145,7 @@ def print_options(options: list[str]) -> None:
     """
     Prints a list of string options with index numbers for user prompt input
     """
+
     print("\n")
     for i, option in enumerate(options):
         print(f"[{i}] {option}")

@@ -1,6 +1,6 @@
 import json
 import pandas as pd
-from typing import List, Dict
+from typing import List, Dict, Union
 from fragments import object_schema_reference
 from manager import BatchManager
 
@@ -34,22 +34,22 @@ class PayloadsGenerator:
             product_type: str = self.store_data_df.loc[self.store_data_df['id'] == product_id, 'productType'].iloc[0]
             product_vendor: str = self.store_data_df.loc[self.store_data_df['id'] == product_id, 'vendor'].iloc[0]
             product_img_urls: List[str] = self.store_data_df.loc[
-                self.store_data_df['id'].str.startswith('gid://shopify/MediaImage/') & 
-                self.store_data_df['__parentId'] == product_id, 
+                (self.store_data_df['id'].str.startswith('gid://shopify/MediaImage/')) & 
+                (self.store_data_df['__parentId'] == product_id), 
                 'image/url'
             ].to_list()
 
             # Get store data for the product's SKUs
-            variants_df: pd.DataFrame = self.store_data_df.loc[
-                self.store_data_df['__parentId'] == product_id &
-                self.store_data_df['id'].str.startswith('gid://shopify/ProductVariant/')
-            ]
-            variants_data: List[Dict] = variants_df[['id', 'sku', 'selectedOptions/0/name', 'image/url']].to_dict(orient='records')
+            variants_data: List[Dict] = self.store_data_df.loc[
+                (self.store_data_df['id'].str.startswith('gid://shopify/ProductVariant/')) & 
+                (self.store_data_df['__parentId'] == product_id), 
+                ['id', 'sku', 'selectedOptions/0/name', 'image/url']
+            ].to_dict(orient='records')
 
             # Get all the supplier data for the SKUs beloging to the product, dropping any blank/NaN values
             for variant_data in variants_data:
                 sku: str = variant_data['sku']
-                supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].dropna().to_dict()
+                supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].iloc[0].dropna().to_dict()
                 variant_data['supplier_data'] = supplier_sku_data
 
             # Get fields to extract, filtered for product type and passed dependency conditions
@@ -66,18 +66,38 @@ class PayloadsGenerator:
             output_schema = self.__build_output_schema(fields_to_extract)
 
             # For product or each variant, generate the request payload, then write to line in batch payloads JSONL file
-            if self.resource_type == 'Product':
+            if self.resource_type == 'Product' and len(variants_data) != 0:
                 print(f"Generating payload for Product ID: {product_id}")
                 self.__generate_write_payload(product_type, product_vendor, variants_data, fields_to_extract, product_id, product_img_urls, output_schema)
-            elif self.resource_type == 'Variant':
+            elif self.resource_type == 'Variant' and len(variants_data) != 0:
                 for variant_data in variants_data:
-                    variant_id = variant_data['id']
-                    print(f"Generating payload for Variant ID: {variant_id}")
-                    self.__generate_write_payload(product_type, product_vendor, variant_data, fields_to_extract, variant_id, product_img_urls, output_schema)
+                    if variant_data['supplier_data'] is not None:      # Skip any variants where the SKU is missing in the supplier data
+                        variant_id = variant_data['id']
+                        print(f"Generating payload for Variant ID: {variant_id}")
+                        self.__generate_write_payload(product_type, product_vendor, variant_data, fields_to_extract, variant_id, product_img_urls, output_schema)
 
-        # If this is the first process order sequence, read the results output to fetch dependency field booleans for each processed SKU
-        if self.process_order_number == 1:
-            self.set_dependency_results()
+    def set_dependency_results(self):
+        """
+        For each product processed in the first sequence process, collect whether extracted required fields were True or False
+        """
+
+        self.dependency_results = {}
+        dependency_fields = self.fields_data_df['Dependency'].dropna().unique()
+
+        with open(self.batch_manager.batch_results_path, 'r', encoding='ascii') as f:
+            for line in f:
+                if line.strip():  # Skip empty lines
+                    try:
+                        line = json.loads(line)
+                        product_id = line['custom_id']
+                        results = line['body']['messages'][1]['content']
+                        
+                        for dependency_field in dependency_fields:
+                            result = results[dependency_field]['value']
+                            self.dependency_results[product_id] = {dependency_field: result}
+
+                    except json.JSONDecodeError as e:
+                        print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
 
     def __build_output_schema(self, fields_to_extract: pd.DataFrame) -> Dict:
         """
@@ -124,7 +144,7 @@ class PayloadsGenerator:
 
         return schema
 
-    def __generate_write_payload(self, product_type: str, product_vendor: str, variants_data: List[Dict] | Dict, fields_to_extract: pd.DataFrame, 
+    def __generate_write_payload(self, product_type: str, product_vendor: str, variants_data: Union[List[Dict], Dict], fields_to_extract: pd.DataFrame, 
                                  object_id: str, product_img_urls: List[str], output_schema: Dict):
         """
         Built the prompt, generate the payload, then write to batch payloads JSONL file.
@@ -156,9 +176,8 @@ class PayloadsGenerator:
             "Be aware that supplier data may include typos or errors. Cross-check all data sources to validate your decision. "
             "When a value cannot be determined confidently and estimation could result in customer complaints, return null. "
             "The priority order for sourcing data should be: (1) supplier data, (2) images, (3) website data (if provided), (4) related SKU data. "
-            "Return a structured JSON object named 'fields_extracted_response' that complies with the schema provided in the request payload. "
-            "Each field must be accompanied by a confidence rating ('Low', 'Medium', or 'High'), even if null. "
-            "Additionally, include a clear reasoning explaining the extracted value or why the field is null. "
+            "All output fields must match the schema specified in the request exactly — including naming, structure, and data type. "
+            "If no value is available, return null under value, but still include confidence and reasoning. "
         )
 
         if self.resource_type == 'Variant':
@@ -197,17 +216,18 @@ class PayloadsGenerator:
             skus = [variant_data['sku'] for variant_data in variants_data]
 
             user_prompt += (
-                f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {[skus]}. \n"
+                f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. \n"
                 "The fields that you're expected to extract data for are at the product level and will apply to all of the SKUs. \n"
                 "Here are the supplier data for each SKU: \n\n"
             )
 
         for variant_data in variants_data:
             user_prompt += f"SKU: {variant_data['sku']} \n"
-            if variant_data['image/url'] is not None:
+            if not pd.isna(variant_data['image/url']):
                 user_prompt += f"SKU Specific Image URL: {variant_data['image/url']} \n"
             for key, value in variant_data['supplier_data'].items():
-                user_prompt += f"{key}: {value} \n"
+                if key is not self.sku_col_name:
+                    user_prompt += f"{key}: {value} \n"
             user_prompt += "\n"
 
         # Fields to extract along with notes and requirement of each field
@@ -222,7 +242,7 @@ class PayloadsGenerator:
 
             prompt_fragment = (
                 f"Field Name: {field} \n"
-                f"Notes: {notes if notes else 'None'} \n"
+                f"Notes: {notes if not pd.isna(notes) else 'None'} \n"
                 f"Required or Optional?: {requirement} \n\n"
             )
 
@@ -272,22 +292,3 @@ class PayloadsGenerator:
         }
 
         return payload
-
-    def set_dependency_results(self):
-        self.dependency_results = {}
-        dependency_fields = self.fields_data_df['Dependency'].dropna().unique()
-
-        with open(self.batch_manager.batch_results_path, 'r', encoding='ascii') as f:
-            for line in f:
-                if line.strip():  # Skip empty lines
-                    try:
-                        line = json.loads(line)
-                        product_id = line['custom_id']
-                        results = line['body']['messages'][1]['content']
-                        
-                        for dependency_field in dependency_fields:
-                            result = results[dependency_field]['value']
-                            self.dependency_results[product_id] = {dependency_field: result}
-
-                    except json.JSONDecodeError as e:
-                        print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
