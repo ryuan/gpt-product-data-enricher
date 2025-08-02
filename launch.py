@@ -14,7 +14,7 @@ def main():
 
     # Initiate PayloadsGenerator object and set Batch API endpoint & model
     payloads_generator = PayloadsGenerator(sku_col_name, supplier_data_df, store_data_df, fields_data_df, product_ids_skus)
-    endpoint = '/v1/chat/responses'
+    endpoint = '/v1/responses'
     model = 'gpt-4o'
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
@@ -28,7 +28,7 @@ def main():
 
         # Create batch payloads JSONL file, upload it, then execute batch payloads asynchronously
         batch_manager.upload_batch_payloads()
-        batch_manager.create_batch(endpoint, model)
+        batch_manager.create_batch()
 
         # Poll status of batch execution, downloading the output JSONL results upon completion
         batch_manager.poll_batch_until_complete()

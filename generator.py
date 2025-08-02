@@ -39,19 +39,6 @@ class PayloadsGenerator:
                 'image/url'
             ].to_list()
 
-            # Get store data for the product's SKUs
-            variants_data: List[Dict] = self.store_data_df.loc[
-                (self.store_data_df['id'].str.startswith('gid://shopify/ProductVariant/')) & 
-                (self.store_data_df['__parentId'] == product_id), 
-                ['id', 'sku', 'selectedOptions/0/name', 'image/url']
-            ].to_dict(orient='records')
-
-            # Get all the supplier data for the SKUs beloging to the product, dropping any blank/NaN values
-            for variant_data in variants_data:
-                sku: str = variant_data['sku']
-                supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].iloc[0].dropna().to_dict()
-                variant_data['supplier_data'] = supplier_sku_data
-
             # Get fields to extract, filtered for product type and passed dependency conditions
             fields_to_extract = self.fields_data_df[self.fields_data_df['Process Order Number'] == process_order_number].dropna(subset=[product_type])
 
@@ -62,19 +49,33 @@ class PayloadsGenerator:
                     if self.dependency_results[product_id][dependency_field] is not True:
                         fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
 
-            # Build the output JSON schema based on the extraction fields
-            output_schema = self.__build_output_schema(fields_to_extract)
+            if not fields_to_extract.empty:
+                # Get store data for the product's SKUs
+                variants_data: List[Dict] = self.store_data_df.loc[
+                    (self.store_data_df['id'].str.startswith('gid://shopify/ProductVariant/')) & 
+                    (self.store_data_df['__parentId'] == product_id), 
+                    ['id', 'sku', 'selectedOptions/0/name', 'image/url']
+                ].to_dict(orient='records')
 
-            # For product or each variant, generate the request payload, then write to line in batch payloads JSONL file
-            if self.resource_type == 'Product' and len(variants_data) != 0:
-                print(f"Generating payload for Product ID: {product_id}")
-                self.__generate_write_payload(product_type, product_vendor, variants_data, fields_to_extract, product_id, product_img_urls, output_schema)
-            elif self.resource_type == 'Variant' and len(variants_data) != 0:
+                # Get all the supplier data for the SKUs beloging to the product, dropping any blank/NaN values
                 for variant_data in variants_data:
-                    if variant_data['supplier_data'] is not None:      # Skip any variants where the SKU is missing in the supplier data
-                        variant_id = variant_data['id']
-                        print(f"Generating payload for Variant ID: {variant_id}")
-                        self.__generate_write_payload(product_type, product_vendor, variant_data, fields_to_extract, variant_id, product_img_urls, output_schema)
+                    sku: str = variant_data['sku']
+                    supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].iloc[0].dropna().to_dict()
+                    variant_data['supplier_data'] = supplier_sku_data
+
+                # Build the output JSON schema based on the extraction fields
+                output_schema = self.__build_output_schema(fields_to_extract)
+
+                # For product or each variant, generate the request payload, then write to line in batch payloads JSONL file
+                if self.resource_type == 'Product' and len(variants_data) != 0:
+                    print(f"Generating payload for Product ID: {product_id}")
+                    self.__generate_write_payload(product_type, product_vendor, variants_data, fields_to_extract, product_id, product_img_urls, output_schema)
+                elif self.resource_type == 'Variant' and len(variants_data) != 0:
+                    for variant_data in variants_data:
+                        if variant_data['supplier_data'] is not None:      # Skip any variants where the SKU is missing in the supplier data
+                            variant_id = variant_data['id']
+                            print(f"Generating payload for Variant ID: {variant_id}")
+                            self.__generate_write_payload(product_type, product_vendor, variant_data, fields_to_extract, variant_id, product_img_urls, output_schema)
 
     def set_dependency_results(self):
         """

@@ -36,6 +36,9 @@ class BatchManager:
             purpose='batch'
         )
 
+        print("Batch JSONL file upload response: ")
+        print(self.upload_response)
+
     def create_batch(self):
         """
         Creates and executes a batch from an uploaded file of requests, returning the batch status object
@@ -44,7 +47,6 @@ class BatchManager:
             input_file_id=self.upload_response.id,
             endpoint=self.endpoint,
             completion_window='24h',
-            model=self.model,
             metadata={'task': 'product_field_enrichment'}
         )
 
