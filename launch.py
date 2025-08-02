@@ -7,13 +7,13 @@ def main():
     client = utils.init()
 
     # Pre-process source files and sequence batches by process order
-    supplier_data_path, image_urls_path, fields_path = utils.get_source_paths()
-    supplier_data_df, image_urls_df, fields_df = utils.get_input_dfs(supplier_data_path, image_urls_path, fields_path)
-    sku_col_name, process_order_numbers = utils.sequence_batches(supplier_data_df, fields_df)
-    sku_to_model, model_to_skus = utils.get_related_skus(sku_col_name, supplier_data_df)
+    supplier_data_path, store_data_path, fields_data_path = utils.get_source_paths()
+    supplier_data_df, store_data_df, fields_data_df = utils.get_input_dfs(supplier_data_path, store_data_path, fields_data_path)
+    sku_col_name, process_order_numbers = utils.sequence_batches(supplier_data_df, fields_data_df)
+    product_ids_skus = utils.get_product_ids_skus(store_data_df)
 
     # Initiate PayloadsGenerator object and set Batch API endpoint & model
-    payloads_generator = PayloadsGenerator(sku_col_name, supplier_data_df, image_urls_df, fields_df, sku_to_model, model_to_skus)
+    payloads_generator = PayloadsGenerator(sku_col_name, supplier_data_df, store_data_df, fields_data_df, product_ids_skus)
     endpoint = '/v1/chat/responses'
     model = 'gpt-4o'
 
