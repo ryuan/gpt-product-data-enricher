@@ -11,6 +11,9 @@ Featuring context-based, sequential batch processing, the program aims to transf
 ## To-Do's
 
 - [x] Pre-process tabular data
+- [x] Web search tool architecture design
+- [x] Web search payload generation
+- [x] Web search execution and handling
 - [x] Data segmenting and fragment design
 - [x] Core algorithm for request sequencing
 - [x] System instructions & prompt design
@@ -22,3 +25,7 @@ Featuring context-based, sequential batch processing, the program aims to transf
 - [ ] Heuristic QA flagging
 - [ ] Prepare Shopify GraphQL mutation inputs
 - [ ] Audit log
+
+## Notes
+
+- OpenAI's Batch API currently does not support the web search tool. Until this feature is unlocked on OpenAI's side, the program will synchronously call the Response API on a per-SKU basis, write results, then relay the parsed output as part of the prompt for each payload in the batch.

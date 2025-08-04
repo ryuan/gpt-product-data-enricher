@@ -3,17 +3,20 @@ import pandas as pd
 from typing import List, Dict, Union
 from fragments import object_schema_reference
 from manager import BatchManager
+from crawler import WebSearchTool
 
 
 class PayloadsGenerator:
-    def __init__(self, sku_col_name: str, supplier_data_df: pd.DataFrame, store_data_df: pd.DataFrame, fields_data_df: pd.DataFrame, product_ids_skus: Dict):
+    def __init__(self, crawler: WebSearchTool, sku_col_name: str, 
+                 supplier_data_df: pd.DataFrame, store_data_df: pd.DataFrame, fields_data_df: pd.DataFrame, product_ids_skus: Dict):
+        self.crawler: WebSearchTool = crawler
         self.sku_col_name: str = sku_col_name
         # Inputs
         self.supplier_data_df: pd.DataFrame = supplier_data_df
         self.store_data_df: pd.DataFrame = store_data_df
         self.fields_data_df: pd.DataFrame = fields_data_df
         # References
-        self.product_ids_skus: str = product_ids_skus
+        self.product_ids_skus: Dict = product_ids_skus
         self.dependency_results: Dict = {}
         # Per-process Variables
         self.process_order_number: int = None
@@ -57,11 +60,12 @@ class PayloadsGenerator:
                     ['id', 'sku', 'selectedOptions/0/name', 'image/url']
                 ].to_dict(orient='records')
 
-                # Get all the supplier data for the SKUs beloging to the product, dropping any blank/NaN values
+                # Get all the supplier and web search data for the SKUs beloging to the product, dropping any blank/NaN values
                 for variant_data in variants_data:
                     sku: str = variant_data['sku']
                     supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].iloc[0].dropna().to_dict()
                     variant_data['supplier_data'] = supplier_sku_data
+                    variant_data['web_data'] = self.crawler.web_search_results[variant_data['id']] if variant_data['id'] in self.crawler.web_search_results.keys() else {}
 
                 # Build the output JSON schema based on the extraction fields
                 output_schema = self.__build_output_schema(fields_to_extract)
@@ -173,7 +177,6 @@ class PayloadsGenerator:
             "Each field will be labeled as either 'Required' or 'Optional'. "
             "'Required' fields must never be left null unless no reliable data exists — in such cases, include an appropriate warning. "
             "'Optional' fields may be left null if no trustworthy value can be extracted. "
-            "For web search, make sure to only use data you're able to find on the suppliers' official website (which often has the supplier's name in the URL). "
             "Be aware that supplier data may include typos or errors. Cross-check all data sources to validate your decision. "
             "When a value cannot be determined confidently and estimation could result in customer complaints, return null. "
             "The priority order for sourcing data should be: (1) supplier data, (2) images, (3) website data (if provided), (4) related SKU data. "
@@ -197,7 +200,7 @@ class PayloadsGenerator:
 
         user_prompt = (
             f"Extract the fields specified in the 'fields_to_extract' object (provided separately in the input). \n"
-            f"Use all sources of data: the supplier-provided attributes (in bullet format), images provided in the payload, and web search results. \n"
+            f"Use all sources of data: the supplier-provided attributes (in bullet format), images provided in the payload, and web search results (if any). \n"
         )
 
         # If the current process is for a variant and the product has multiple variants, then warn model about image use. 
@@ -207,11 +210,11 @@ class PayloadsGenerator:
                 "Always confirm that an image is relevant to this SKU before using it to extract data. \n"
             )
 
-        # Supplier data for the product's variant(s)
+        # Supplier and web search result data for the product's variant(s)
         if len(variants_data) == 1:
             user_prompt += (
                 f"You will review data for SKU {variants_data[0]['sku']} by our supplier {product_vendor}. \n"
-                "Here is the supplier data: \n\n"
+                "Here is the supplier data and web search result data (if any): \n\n"
             )
         else:
             skus = [variant_data['sku'] for variant_data in variants_data]
@@ -219,7 +222,7 @@ class PayloadsGenerator:
             user_prompt += (
                 f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. \n"
                 "The fields that you're expected to extract data for are at the product level and will apply to all of the SKUs. \n"
-                "Here are the supplier data for each SKU: \n\n"
+                "Here are the supplier data and web search result data (if any) for each SKU: \n\n"
             )
 
         for variant_data in variants_data:
@@ -229,6 +232,10 @@ class PayloadsGenerator:
             for key, value in variant_data['supplier_data'].items():
                 if key is not self.sku_col_name:
                     user_prompt += f"{key}: {value} \n"
+            for key, value in variant_data['web_data'].items():
+                if value is not variant_data['sku']:
+                    user_prompt += f"{key}: {value} \n"
+
             user_prompt += "\n"
 
         # Fields to extract along with notes and requirement of each field
@@ -273,7 +280,6 @@ class PayloadsGenerator:
             'url': self.batch_manager.endpoint,
             'body': {
                 'model': self.batch_manager.model,
-                'tools': [{ "type": "web_search_preview" }],
                 'instructions': system_instructions,
                 'input': [
                     {

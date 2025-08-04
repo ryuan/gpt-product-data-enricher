@@ -1,10 +1,13 @@
 import utils
 from generator import PayloadsGenerator
 from manager import BatchManager
+from crawler import WebSearchTool
 
 
 def main():
     client = utils.init()
+    endpoint = '/v1/responses'
+    model = 'gpt-4o'
 
     # Pre-process source files and sequence batches by process order
     supplier_data_path, store_data_path, fields_data_path = utils.get_source_paths()
@@ -12,14 +15,17 @@ def main():
     sku_col_name, process_order_numbers = utils.sequence_batches(supplier_data_df, fields_data_df)
     product_ids_skus = utils.get_product_ids_skus(store_data_df)
 
-    # Initiate PayloadsGenerator object and set Batch API endpoint & model
-    payloads_generator = PayloadsGenerator(sku_col_name, supplier_data_df, store_data_df, fields_data_df, product_ids_skus)
-    endpoint = '/v1/responses'
-    model = 'gpt-4o'
+    # Prompt user to run web search tool (or reuse existing web search results)
+    web_search_results_path = 'web-search/web_search_results.jsonl'
+    crawler = WebSearchTool(client, endpoint, model, store_data_df, web_search_results_path)
+    crawler.run()
+
+    # Initiate PayloadsGenerator object
+    payloads_generator = PayloadsGenerator(crawler, sku_col_name, supplier_data_df, store_data_df, fields_data_df, product_ids_skus)
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
-    for process_order_number in [1]:
-        batch_payloads_path = f'output/batch_payloads_{process_order_number}.jsonl'
+    for process_order_number in process_order_numbers:
+        batch_payloads_path = f'payloads/batch_payloads_{process_order_number}.jsonl'
         batch_results_path = f'output/batch_results_{process_order_number}.jsonl'
         batch_manager = BatchManager(client, endpoint, model, batch_payloads_path, batch_results_path)
 
