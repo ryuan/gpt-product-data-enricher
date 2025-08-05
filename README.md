@@ -28,4 +28,5 @@ Featuring context-based, sequential batch processing, the program aims to transf
 
 ## Notes
 
-- OpenAI's Batch API currently does not support the web search tool. Until this feature is unlocked on OpenAI's side, the program will synchronously call the Response API on a per-SKU basis, write results, then relay the parsed output as part of the prompt for each payload in the batch.
+- OpenAI's Batch API currently does not support the web search tool. Until this feature is unlocked on OpenAI's side, the program can synchronously call the Response API on a per-SKU basis, write results, then relay the parsed output as part of the prompt for each payload in the batch.
+- As of now, the web search tool in its preview form produces very low quality results and high hallucination rates (outright inventing URLs or not copying data exactly from supplier webpages). The option will remain in the prorgram, but is not recommended for use.

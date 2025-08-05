@@ -75,6 +75,9 @@ class BatchManager:
         if self.batch.status != "completed":
             print(f"Batch job did not complete successfully. Status: {self.batch.status}")
             sys.exit()
+        elif self.batch.errors:
+            print(f"Batch job completed but with errors: {self.batch.errors}")
+            sys.exit()
 
         print(f"Downloading results...")
         self.results = self.client.files.content(self.batch.output_file_id)

@@ -8,7 +8,7 @@ single_dimension_schema = {
     'additionalProperties': False
 }
 dimension_schema = {
-    'type': 'object',
+    'type': ['object', 'null'],
     'properties': {
         'width': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True},
         'depth': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True},
@@ -18,7 +18,7 @@ dimension_schema = {
     'additionalProperties': False
 }
 dimension_sets_schema = {
-    'type': 'object',
+    'type': ['object', 'null'],
     'properties': {
         'name': {'type': 'string', 'pattern': '\\S+'},
         'dimension': {'type': 'array', 'items': dimension_schema, 'minItems': 1, 'uniqueItems': True}
@@ -27,7 +27,7 @@ dimension_sets_schema = {
     'additionalProperties': False
 }
 weight_schema = {
-    'type': 'object',
+    'type': ['object', 'null'],
     'properties': {
         'unit': {'enum': ['OUNCE', 'POUND']},
         'value': {'type': 'number', 'minimum': 0}
@@ -36,7 +36,7 @@ weight_schema = {
     'additionalProperties': False
 }
 package_measurement_schema = {
-    'type': 'object',
+    'type': ['object', 'null'],
     'properties': {
         'dimension': dimension_schema,
         'weight': weight_schema

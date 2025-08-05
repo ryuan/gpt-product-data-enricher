@@ -24,7 +24,7 @@ def main():
     payloads_generator = PayloadsGenerator(crawler, sku_col_name, supplier_data_df, store_data_df, fields_data_df, product_ids_skus)
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
-    for process_order_number in process_order_numbers:
+    for process_order_number in [1]:
         batch_payloads_path = f'payloads/batch_payloads_{process_order_number}.jsonl'
         batch_results_path = f'output/batch_results_{process_order_number}.jsonl'
         batch_manager = BatchManager(client, endpoint, model, batch_payloads_path, batch_results_path)

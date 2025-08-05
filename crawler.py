@@ -23,7 +23,7 @@ class WebSearchTool:
 
     def run(self):
         print_options(['Do not run web search', 'Reuse web search results', 'Run new web search session'])
-        choice_idx = int(input("Do you want to run web search to fetch data first?"))
+        choice_idx = int(input("Do you want to run web search to fetch data first?: "))
 
         if choice_idx == 0:
             return
@@ -74,23 +74,21 @@ class WebSearchTool:
             }
         )
 
-        return response
+        return response.output[1].content[0].text
 
     def __build_instructions_prompt(self, sku: str, product_vendor: str) -> Tuple[str, str]:
         system_instructions = (
             "You are a product data analyst with access to web search. "
-            "You will perform web search only on the supplier’s official website to verify or extract structured product data. "
-            "The output schema expects you to extract the product description, bulleted lists, and tabular data as key-value pairs. "
-            "If the web search result page does not have descirption or bulleted lists, just leave them blank."
+            "You will perform web search only on the supplier's official website and subdomains to verify or extract structured product data."
         )
 
         user_prompt = (
             f"Search for SKU {sku} from supplier {product_vendor} on the web. "
             "Use only the supplier's official website as the source. "
-            "Note that some suppliers have multiple websites so search them all."
-            "Be concise, accurate, and return all available fields in structured JSON format. "
-            "Extract and return available product data including dimensions, materials, features, number of drawers, etc. "
-            "Extract the data exactly as they appear in the description, bullet list, and tables - do not alter them in any way. "
+            f"Note that {product_vendor} may have a main website as well as a subdomain, both of which is allowed as sources. "
+            "Get the data exactly as they appear on the supplier website - do not paraphrase or modify anything even if there are typos. "
+            "If the supplier groups multiple SKUs data into a unified product page, get the data relevant for the SKU. "
+            "If any webpage is missing data to match any of description, highlights, or attributes keys as specified in the output schema, leave them as null."
         )
 
         return system_instructions, user_prompt
@@ -99,14 +97,27 @@ class WebSearchTool:
         schema = {
             'type': 'object',
             'properties': {
-                'url': {'type': 'string'},
-                'description': {'type': 'string'},
+                'url': {
+                    'type': ['array', 'null'],
+                    'description': 'The URL of the supplier webpage(s) where you got the data from.',
+                    'items': {'type': 'string'}
+                },
+                'notes': {
+                    'type': 'string',
+                    'description': 'Any notes, such as if you were unable to find a supplier webpage URL for a SKU or why you left anything null.'
+                    },
+                'description': {
+                    'type': ['string', 'null'],
+                    'description': 'Block of text representing product description on a supplier webpage.'
+                    },
                 'highlights': {
-                    'type': 'array',
+                    'type': ['array', 'null'],
+                    'description': 'Any list of features or bulleted descriptions on a supplier webpage. Each line should be an element in this list.',
                     'items': {'type': 'string'}
                 },
                 'attributes': {
-                    'type': 'object',
+                    'type': ['object', 'null'],
+                    'description': 'For any table data on a supplier webpage, store them as key-value pairs here. Do not alter any of the values.',
                     'properties': {
                         'name': {'type': 'string'},
                         'value': {'type': 'string'}
@@ -114,7 +125,9 @@ class WebSearchTool:
                     'required': ['name', 'value'],
                     'additionalProperties': False
                 }
-            }
+            },
+            'required': ['url', 'notes', 'description', 'highlights', 'attributes'],
+            'additionalProperties': False
         }
 
         return schema

@@ -95,7 +95,7 @@ class PayloadsGenerator:
                     try:
                         line = json.loads(line)
                         product_id = line['custom_id']
-                        results = line['body']['messages'][1]['content']
+                        results = line['response']['body']['output'][0]['content']
                         
                         for dependency_field in dependency_fields:
                             result = results[dependency_field]['value']
@@ -138,14 +138,16 @@ class PayloadsGenerator:
             schema_properties[field] = {
                 'type': 'object',
                 'properties': {
-                    'value': field_value_structure,
-                    'confidence': {'enum': ['low', 'medium', 'high']},
                     'reasoning': {'type': 'string'},
-                    'warning': {'type': 'string'}
-                }
+                    'confidence': {'enum': ['low', 'medium', 'high']},
+                    'warning': {'type': 'string'},
+                    'value': field_value_structure,
+                },
+                'required': ['value', 'confidence', 'reasoning', 'warning'],
+                'additionalProperties': False
             }
 
-        schema = {'type': 'object', 'properties': schema_properties}
+        schema = {'type': 'object', 'properties': schema_properties, 'required': fields, 'additionalProperties': False}
 
         return schema
 
