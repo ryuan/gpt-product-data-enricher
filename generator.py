@@ -1,4 +1,5 @@
 import json
+import tiktoken
 import pandas as pd
 from typing import List, Dict, Union
 from fragments import object_schema_reference
@@ -23,6 +24,8 @@ class PayloadsGenerator:
         self.process_order_number: int = None
         self.resource_type: str = None
         self.batch_manager: BatchManager = None
+        self.total_tokens = 0
+        self.encoder: tiktoken.Encoding = None
 
     def generate_batch_payloads(self, process_order_number: int, batch_manager: BatchManager):
         """
@@ -32,6 +35,8 @@ class PayloadsGenerator:
         self.process_order_number = process_order_number
         self.resource_type = self.fields_data_df.loc[self.fields_data_df['Process Order Number'] == self.process_order_number, 'Resource'].iloc[0]
         self.batch_manager = batch_manager
+        self.total_tokens = 0
+        self.encoder = tiktoken.encoding_for_model(batch_manager.model)
         product_ids: List[str] = self.store_data_df.loc[self.store_data_df['id'].str.startswith('gid://shopify/Product/'), 'id'].to_list()
 
         for product_id in product_ids:
@@ -82,6 +87,8 @@ class PayloadsGenerator:
                             print(f"Generating payload for Variant ID: {variant_id}")
                             self.__generate_write_payload(product_type, product_vendor, variant_data, fields_to_extract, variant_id, product_img_urls, output_schema)
 
+        print(f"Estimated total tokens in batch {self.process_order_number} = {self.total_tokens}")
+
     def set_dependency_results(self):
         """
         For each product processed in the first sequence process, collect whether extracted required fields were True or False
@@ -122,13 +129,14 @@ class PayloadsGenerator:
             field_object_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Object Type'].iloc[0]
 
             if field_type in ['string', 'number', 'boolean']:
-                field_value_structure['type'] = field_type
+                field_value_structure['type'] = [field_type, 'null']
             elif field_type == 'enum':
-                field_value_structure['enum'] = json.loads(field_enum_values)
+                field_value_structure['type'] = ['string', 'null']
+                field_value_structure['enum'] = json.loads(field_enum_values) + [None]
             elif field_type == 'object':
                 field_value_structure = object_schema_reference[field_object_type]
             elif field_type == 'array':
-                field_value_structure['type'] = field_type
+                field_value_structure['type'] = [field_type, 'null']
 
                 if field_array_items in ['string', 'number', 'boolean']:
                     field_value_structure['items'] = {'type': field_array_items}
@@ -165,7 +173,7 @@ class PayloadsGenerator:
 
         system_instructions = self.__build_instructions()
         user_prompt = self.__build_prompt(product_type, product_vendor, variants_data, fields_to_extract)
-        payload = self.__generate_single_payload(object_id, system_instructions, user_prompt, product_img_urls, output_schema)
+        payload = self.__generate_single_payload(object_id, system_instructions, user_prompt, product_img_urls, output_schema)        
         self.batch_manager.write(payload)
 
     def __build_instructions(self) -> str:
@@ -272,7 +280,7 @@ class PayloadsGenerator:
             product_img_json_object = {
                 'type': 'input_image',
                 'image_url': product_img_url,
-                'detail': 'auto'
+                'detail': 'low'
             }
             input_img_json_objects.append(product_img_json_object)
 
@@ -302,4 +310,19 @@ class PayloadsGenerator:
             }
         }
 
+        tokens = self.__estimate_tokens(system_instructions, user_prompt, product_img_urls, output_schema)
+
         return payload
+    
+    def __estimate_tokens(self, system_instructions: str, user_prompt: str, product_img_urls: List[str], output_schema: Dict) -> int:
+        tokens = 0
+
+        tokens += len(self.encoder.encode(system_instructions))
+        tokens += len(self.encoder.encode(user_prompt))
+        tokens += 85 * len(product_img_urls)        # 85 tokens limit if image 'detail' is set to 'low'
+        tokens += len(self.encoder.encode(str(output_schema)))
+
+        print(f"Estimated input payload tokens = {tokens}")
+        self.total_tokens += tokens
+
+        return tokens

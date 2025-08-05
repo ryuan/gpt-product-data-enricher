@@ -64,7 +64,8 @@ class BatchManager:
             if self.batch.status in ['completed', 'failed', 'cancelled', 'expired']:
                 print(f"Batch execution complete. Status: {self.batch.status}")
                 if self.batch.status == 'failed':
-                    print(self.batch.errors)
+                    print(self.batch.errors.data[0].code)
+                    print(self.batch.errors.data[0].message)
                 return
             time.sleep(poll_interval)
 
