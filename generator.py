@@ -4,6 +4,7 @@ from typing import List, Dict, Union
 from fragments import object_schema_reference
 from manager import BatchManager
 from crawler import WebSearchTool
+from pprint import pprint
 
 
 class PayloadsGenerator:
@@ -46,7 +47,7 @@ class PayloadsGenerator:
             fields_to_extract = self.fields_data_df[self.fields_data_df['Process Order Number'] == process_order_number].dropna(subset=[product_type])
 
             if self.dependency_results:
-                dependency_fields = fields_to_extract['Dependency'].dropna().unique().to_list()
+                dependency_fields = fields_to_extract['Dependency'].dropna().unique()
 
                 for dependency_field in dependency_fields:
                     if self.dependency_results[product_id][dependency_field] is not True:
@@ -95,11 +96,12 @@ class PayloadsGenerator:
                     try:
                         line = json.loads(line)
                         product_id = line['custom_id']
-                        results = line['response']['body']['output'][0]['content']
+                        self.dependency_results[product_id] = {}
+                        results: Dict = json.loads(line['response']['body']['output'][0]['content'][0]['text'])
                         
                         for dependency_field in dependency_fields:
-                            result = results[dependency_field]['value']
-                            self.dependency_results[product_id] = {dependency_field: result}
+                            if dependency_field in results.keys():
+                                self.dependency_results[product_id][dependency_field] = results[dependency_field]['value']
 
                     except json.JSONDecodeError as e:
                         print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
@@ -173,7 +175,7 @@ class PayloadsGenerator:
 
         system_instructions = (
             "You are an expert product data analyst for a large home goods retailer like Wayfair. "
-            "Your job is to extract standardized field values from supplier spreadsheet data, product images, and crawled website data. "
+            "Your job is to extract standardized field values from supplier spreadsheet data and product images. "
             "Every attribute from the supplier data should be carefully examined when evaluating each field. "
             "Specific instructions and rules may be provided for certain fields — follow these exactly. "
             "Each field will be labeled as either 'Required' or 'Optional'. "
@@ -181,7 +183,6 @@ class PayloadsGenerator:
             "'Optional' fields may be left null if no trustworthy value can be extracted. "
             "Be aware that supplier data may include typos or errors. Cross-check all data sources to validate your decision. "
             "When a value cannot be determined confidently and estimation could result in customer complaints, return null. "
-            "The priority order for sourcing data should be: (1) supplier data, (2) images, (3) website data (if provided), (4) related SKU data. "
             "All output fields must match the schema specified in the request exactly — including naming, structure, and data type. "
             "If no value is available, return null under value, but still include confidence and reasoning. "
         )
@@ -202,7 +203,7 @@ class PayloadsGenerator:
 
         user_prompt = (
             f"Extract the fields specified in the 'fields_to_extract' object (provided separately in the input). \n"
-            f"Use all sources of data: the supplier-provided attributes (in bullet format), images provided in the payload, and web search results (if any). \n"
+            f"Use all sources of data: the supplier-provided attributes (in bullet format) and images provided in the payload. \n"
         )
 
         # If the current process is for a variant and the product has multiple variants, then warn model about image use. 
@@ -241,7 +242,7 @@ class PayloadsGenerator:
             user_prompt += "\n"
 
         # Fields to extract along with notes and requirement of each field
-        user_prompt += "Here are the fields you'll be extracting data to. Follow any notes/instructions if specified for a specific field: \n\n"
+        user_prompt += "Here are the fields you'll be extracting data to. Follow any notes if specified for a specific field: \n\n"
 
         fields_data = fields_to_extract[['Field', 'Notes', product_type]].to_dict(orient='records')
 
@@ -270,7 +271,8 @@ class PayloadsGenerator:
         for product_img_url in product_img_urls:
             product_img_json_object = {
                 'type': 'input_image',
-                'image_url': product_img_url
+                'image_url': product_img_url,
+                'detail': 'auto'
             }
             input_img_json_objects.append(product_img_json_object)
 
