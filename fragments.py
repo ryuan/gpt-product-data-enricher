@@ -10,18 +10,18 @@ single_dimension_schema = {
 dimension_schema = {
     'type': ['object', 'null'],
     'properties': {
-        'width': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True},
-        'depth': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True},
-        'height': {'type': 'array', 'items': single_dimension_schema, 'minItems': 1, 'uniqueItems': True}
+        'width': {'type': ['array', 'null'], 'items': single_dimension_schema, 'minItems': 1},
+        'depth': {'type': ['array', 'null'], 'items': single_dimension_schema, 'minItems': 1},
+        'height': {'type': ['array', 'null'], 'items': single_dimension_schema, 'minItems': 1}
     },
-    'minProperties': 2,
+    'required': ['width', 'depth', 'height'],
     'additionalProperties': False
 }
 dimension_sets_schema = {
     'type': ['object', 'null'],
     'properties': {
         'name': {'type': 'string', 'pattern': '\\S+'},
-        'dimension': {'type': 'array', 'items': dimension_schema, 'minItems': 1, 'uniqueItems': True}
+        'dimension': {'type': 'array', 'items': dimension_schema, 'minItems': 1}
     },
     'required': ['name', 'dimension'],
     'additionalProperties': False

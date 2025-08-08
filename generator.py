@@ -5,7 +5,6 @@ from typing import List, Dict, Union
 from fragments import object_schema_reference
 from manager import BatchManager
 from crawler import WebSearchTool
-from pprint import pprint
 
 
 class PayloadsGenerator:
@@ -40,52 +39,34 @@ class PayloadsGenerator:
         product_ids: List[str] = self.store_data_df.loc[self.store_data_df['id'].str.startswith('gid://shopify/Product/'), 'id'].to_list()
 
         for product_id in product_ids:
-            product_type: str = self.store_data_df.loc[self.store_data_df['id'] == product_id, 'productType'].iloc[0]
-            product_vendor: str = self.store_data_df.loc[self.store_data_df['id'] == product_id, 'vendor'].iloc[0]
-            product_img_urls: List[str] = self.store_data_df.loc[
+            product_data: Dict = self.store_data_df.loc[
+                self.store_data_df['id'] == product_id, 
+                ['id', 'vendor', 'productType']
+                ].iloc[0].to_dict()
+            product_data['image/url'] = self.store_data_df.loc[
                 (self.store_data_df['id'].str.startswith('gid://shopify/MediaImage/')) & 
                 (self.store_data_df['__parentId'] == product_id), 
                 'image/url'
             ].to_list()
 
-            # Get fields to extract, filtered for product type and passed dependency conditions
-            fields_to_extract = self.fields_data_df[self.fields_data_df['Process Order Number'] == process_order_number].dropna(subset=[product_type])
-
-            if self.dependency_results:
-                dependency_fields = fields_to_extract['Dependency'].dropna().unique()
-
-                for dependency_field in dependency_fields:
-                    if self.dependency_results[product_id][dependency_field] is not True:
-                        fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
+            # Get fields to extract for this product's type, omitting any fields that failed dependency check
+            fields_to_extract = self.__get_fields_to_extract(product_id, product_data)
 
             if not fields_to_extract.empty:
-                # Get store data for the product's SKUs
-                variants_data: List[Dict] = self.store_data_df.loc[
-                    (self.store_data_df['id'].str.startswith('gid://shopify/ProductVariant/')) & 
-                    (self.store_data_df['__parentId'] == product_id), 
-                    ['id', 'sku', 'selectedOptions/0/name', 'image/url']
-                ].to_dict(orient='records')
-
-                # Get all the supplier and web search data for the SKUs beloging to the product, dropping any blank/NaN values
-                for variant_data in variants_data:
-                    sku: str = variant_data['sku']
-                    supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].iloc[0].dropna().to_dict()
-                    variant_data['supplier_data'] = supplier_sku_data
-                    variant_data['web_data'] = self.crawler.web_search_results[variant_data['id']] if variant_data['id'] in self.crawler.web_search_results.keys() else {}
+                # For each variant, collect supplier data, store data, and web search data
+                variants_data = self.__get_variants_data(product_id)
 
                 # Build the output JSON schema based on the extraction fields
                 output_schema = self.__build_output_schema(fields_to_extract)
 
                 # For product or each variant, generate the request payload, then write to line in batch payloads JSONL file
                 if self.resource_type == 'Product' and len(variants_data) != 0:
-                    print(f"Generating payload for Product ID: {product_id}")
-                    self.__generate_write_payload(product_type, product_vendor, variants_data, fields_to_extract, product_id, product_img_urls, output_schema)
+                    self.__generate_single_payload(product_id, product_data, variants_data, fields_to_extract, output_schema)
                 elif self.resource_type == 'Variant' and len(variants_data) != 0:
                     for variant_data in variants_data:
-                        if variant_data['supplier_data'] is not None:      # Skip any variants where the SKU is missing in the supplier data
+                        if variant_data['supplier_data'] is not None:      # Skip any variants without supplier data
                             variant_id = variant_data['id']
-                            print(f"Generating payload for Variant ID: {variant_id}")
-                            self.__generate_write_payload(product_type, product_vendor, variant_data, fields_to_extract, variant_id, product_img_urls, output_schema)
+                            self.__generate_single_payload(variant_id, product_data, variants_data, fields_to_extract, output_schema)
 
         print(f"Estimated total tokens in batch {self.process_order_number} = {self.total_tokens}")
 
@@ -101,17 +82,55 @@ class PayloadsGenerator:
             for line in f:
                 if line.strip():  # Skip empty lines
                     try:
-                        line = json.loads(line)
-                        product_id = line['custom_id']
+                        result = json.loads(line)
+                        product_id = result['custom_id']
                         self.dependency_results[product_id] = {}
-                        results: Dict = json.loads(line['response']['body']['output'][0]['content'][0]['text'])
+                        outputs: Dict = json.loads(result['response']['body']['output'][0]['content'][0]['text'])
                         
                         for dependency_field in dependency_fields:
-                            if dependency_field in results.keys():
-                                self.dependency_results[product_id][dependency_field] = results[dependency_field]['value']
+                            if dependency_field in outputs.keys():
+                                self.dependency_results[product_id][dependency_field] = outputs[dependency_field]['value']
 
                     except json.JSONDecodeError as e:
                         print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
+
+    def __get_fields_to_extract(self, product_id: str, product_data: Dict) -> pd.DataFrame:
+        """
+        Get the fields for this product's type and this process order number, omitting any fields that did not pass dependency check
+        """
+
+        fields_to_extract = self.fields_data_df[self.fields_data_df['Process Order Number'] == self.process_order_number].dropna(subset=[product_data['productType']])
+
+        if self.dependency_results:
+            dependency_fields = fields_to_extract['Dependency'].dropna().unique()
+
+            for dependency_field in dependency_fields:
+                if dependency_field in self.dependency_results[product_id].keys():
+                    if self.dependency_results[product_id][dependency_field] is not True:
+                        fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
+
+        return fields_to_extract
+
+    def __get_variants_data(self, product_id: str) -> List[Dict]:
+        """
+        Get the data for each variant of the product, including supplier data, store data, and web search data
+        """
+
+        # Get store data for the product's SKUs
+        variants_data: List[Dict] = self.store_data_df.loc[
+            (self.store_data_df['id'].str.startswith('gid://shopify/ProductVariant/')) & 
+            (self.store_data_df['__parentId'] == product_id), 
+            ['id', 'sku', 'image/url']
+        ].to_dict(orient='records')
+
+        # Get all the supplier and web search data for the SKUs beloging to the product, dropping any blank/NaN values
+        for variant_data in variants_data:
+            sku: str = variant_data['sku']
+            supplier_sku_data = self.supplier_data_df[self.supplier_data_df[self.sku_col_name] == sku].iloc[0].dropna().to_dict()
+            variant_data['supplier_data'] = supplier_sku_data
+            variant_data['web_data'] = self.crawler.web_search_results[variant_data['id']] if variant_data['id'] in self.crawler.web_search_results.keys() else {}
+
+        return variants_data
 
     def __build_output_schema(self, fields_to_extract: pd.DataFrame) -> Dict:
         """
@@ -123,10 +142,17 @@ class PayloadsGenerator:
 
         for field in fields:
             field_value_structure = {}
-            field_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Type'].iloc[0]
-            field_enum_values = fields_to_extract[fields_to_extract['Field'] == field]['JSON Enum Values'].iloc[0]
-            field_array_items = fields_to_extract[fields_to_extract['Field'] == field]['JSON Array Items'].iloc[0]
-            field_object_type = fields_to_extract[fields_to_extract['Field'] == field]['JSON Object Type'].iloc[0]
+            field_data = fields_to_extract[fields_to_extract['Field'] == field].iloc[0]
+            field_type = field_data['JSON Type']
+            field_enum_values = field_data['JSON Enum Values']
+            field_array_items = field_data['JSON Array Items']
+            field_object_type = field_data['JSON Object Type']
+
+            if field == 'Pile Height':
+                print(f"field_type: {field_type}")
+                print(f"field_enum_values: {field_enum_values}")
+                print(f"field_array_items: {field_array_items}")
+                print(f"field_object_type: {field_object_type}")
 
             if field_type in ['string', 'number', 'boolean']:
                 field_value_structure['type'] = [field_type, 'null']
@@ -141,7 +167,7 @@ class PayloadsGenerator:
                 if field_array_items in ['string', 'number', 'boolean']:
                     field_value_structure['items'] = {'type': field_array_items}
                 elif field_array_items == 'enum':
-                    field_value_structure['items'] = {'enum': json.loads(field_enum_values)}
+                    field_value_structure['items'] = {'enum': json.loads(field_enum_values) + [None]}
                 elif field_array_items == 'object':
                     field_value_structure['items'] = object_schema_reference[field_object_type]
 
@@ -150,7 +176,7 @@ class PayloadsGenerator:
                 'properties': {
                     'reasoning': {'type': 'string'},
                     'confidence': {'enum': ['low', 'medium', 'high']},
-                    'warning': {'type': 'string'},
+                    'warning': {'type': ['string', 'null']},
                     'value': field_value_structure,
                 },
                 'required': ['value', 'confidence', 'reasoning', 'warning'],
@@ -161,22 +187,21 @@ class PayloadsGenerator:
 
         return schema
 
-    def __generate_write_payload(self, product_type: str, product_vendor: str, variants_data: Union[List[Dict], Dict], fields_to_extract: pd.DataFrame, 
-                                 object_id: str, product_img_urls: List[str], output_schema: Dict):
+    def __generate_single_payload(self, object_id: str, product_data: Dict, variants_data: List[Dict], fields_to_extract: pd.DataFrame, output_schema: Dict):
         """
         Built the prompt, generate the payload, then write to batch payloads JSONL file.
         """
 
-        # Coerce variants_data to a list if dict (representing a single variant data) was used as arg
-        if isinstance(variants_data, dict):
-            variants_data = [variants_data]
-
-        system_instructions = self.__build_instructions()
-        user_prompt = self.__build_prompt(product_type, product_vendor, variants_data, fields_to_extract)
-        payload = self.__generate_single_payload(object_id, system_instructions, user_prompt, product_img_urls, output_schema)        
+        print(f"Generating payload for {object_id}")
+        product_type = product_data['productType']
+        product_vendor = product_data['vendor']
+        product_img_urls = product_data['image/url']
+        system_instructions = self.__compose_instructions(product_type, fields_to_extract)
+        user_prompt = self.__compose_prompt(object_id, product_vendor, variants_data)
+        payload = self.__build_payload(object_id, system_instructions, user_prompt, product_img_urls, output_schema)        
         self.batch_manager.write(payload)
 
-    def __build_instructions(self) -> str:
+    def __compose_instructions(self, product_type: str, fields_to_extract: pd.DataFrame) -> str:
         """
         Compose system instructions for a product or variant payload.
         """
@@ -199,58 +224,11 @@ class PayloadsGenerator:
             system_instructions += (
                 "Never guess or create new dimension values based solely on image appearances. "
                 "However, you may reuse dimension values from supplier data if the label clearly maps to the intended field. "
-                "For example, the 'Clearance Height' of a coffee table may be used for the 'Leg Dimension' field if applicable."
+                "For example, the 'Clearance Height' of a coffee table may be used for the 'Leg Dimension' field if applicable. \n\n"
             )
-
-        return system_instructions
-
-    def __build_prompt(self, product_type: str, product_vendor: str, variants_data: List[Dict], fields_to_extract: pd.DataFrame) -> str:
-        """
-        Compose user prompt for a product or variant payload.
-        """
-
-        user_prompt = (
-            f"Extract the fields specified in the 'fields_to_extract' object (provided separately in the input). \n"
-            f"Use all sources of data: the supplier-provided attributes (in bullet format) and images provided in the payload. \n"
-        )
-
-        # If the current process is for a variant and the product has multiple variants, then warn model about image use. 
-        if self.resource_type == 'Variant' and variants_data[0]['selectedOptions/0/name'] is not 'Title':
-            user_prompt += (
-                "Note: The images provided are for the product family this SKU belongs to, and may or may not depict this specific SKU or variant. \n"
-                "Always confirm that an image is relevant to this SKU before using it to extract data. \n"
-            )
-
-        # Supplier and web search result data for the product's variant(s)
-        if len(variants_data) == 1:
-            user_prompt += (
-                f"You will review data for SKU {variants_data[0]['sku']} by our supplier {product_vendor}. \n"
-                "Here is the supplier data and web search result data (if any): \n\n"
-            )
-        else:
-            skus = [variant_data['sku'] for variant_data in variants_data]
-
-            user_prompt += (
-                f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. \n"
-                "The fields that you're expected to extract data for are at the product level and will apply to all of the SKUs. \n"
-                "Here are the supplier data and web search result data (if any) for each SKU: \n\n"
-            )
-
-        for variant_data in variants_data:
-            user_prompt += f"SKU: {variant_data['sku']} \n"
-            if not pd.isna(variant_data['image/url']):
-                user_prompt += f"SKU Specific Image URL: {variant_data['image/url']} \n"
-            for key, value in variant_data['supplier_data'].items():
-                if key is not self.sku_col_name:
-                    user_prompt += f"{key}: {value} \n"
-            for key, value in variant_data['web_data'].items():
-                if value is not variant_data['sku']:
-                    user_prompt += f"{key}: {value} \n"
-
-            user_prompt += "\n"
 
         # Fields to extract along with notes and requirement of each field
-        user_prompt += "Here are the fields you'll be extracting data to. Follow any notes if specified for a specific field: \n\n"
+        user_prompt += "Here are the fields you'll be extracting data to. Follow any notes if specified for a specific field: \n"
 
         fields_data = fields_to_extract[['Field', 'Notes', product_type]].to_dict(orient='records')
 
@@ -267,9 +245,55 @@ class PayloadsGenerator:
 
             user_prompt += prompt_fragment
 
+        return system_instructions
+
+    def __compose_prompt(self, object_id: str, product_vendor: str, variants_data: List[Dict]) -> str:
+        """
+        Compose user prompt for a product or variant payload.
+        """
+
+        user_prompt = (
+            f"Extract the fields specified in the 'fields_to_extract' object (provided separately in the input). \n"
+            f"Use all sources of data: the supplier-provided attributes (in bullet format) and images provided in the payload. \n"
+        )
+
+        # If the current process is for one of many variants, then warn system that not all images are for this variant. 
+        if self.resource_type == 'Variant' and len(variants_data) > 1:
+            user_prompt += (
+                "Note: The images provided are for the product family this SKU belongs to, and may or may not depict this specific SKU or variant. \n"
+                "Make sure that an image is relevant to this SKU before using it to extract data. \n"
+            )
+
+        # Supplier and web search result data for the product's variant(s)
+        if self.resource_type == 'Product' and len(variants_data) > 1:
+            skus = [variant_data['sku'] for variant_data in variants_data]
+
+            user_prompt += (
+                f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. \n"
+                "The fields that you're expected to extract data for are at the product level and will apply to all of the SKUs. \n"
+                "Here are the supplier data and web search result data (if any) for each SKU: \n\n"
+            )
+        else:
+            user_prompt += (
+                f"You will review data for SKU {variants_data[0]['sku']} by our supplier {product_vendor}. \n"
+                "Here is the supplier data and web search result data (if any): \n\n"
+            )
+
+        for variant_data in variants_data:
+            if self.resource_type == 'Product' or (self.resource_type == 'Variant' and variant_data['id'] == object_id):
+                user_prompt += f"SKU: {variant_data['sku']} \n"
+                if not pd.isna(variant_data['image/url']):
+                    user_prompt += f"SKU Specific Image URL: {variant_data['image/url']} \n"
+                for key, value in variant_data['supplier_data'].items():
+                    if key is not self.sku_col_name:
+                        user_prompt += f"{key}: {value} \n"
+                for key, value in variant_data['web_data'].items():
+                    if value is not variant_data['sku']:
+                        user_prompt += f"{key}: {value} \n"
+
         return user_prompt
 
-    def __generate_single_payload(self, object_id: str, system_instructions: str, user_prompt: str, product_img_urls: List[str], output_schema: Dict) -> Dict:
+    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, product_img_urls: List[str], output_schema: Dict) -> Dict:
         """
         Construct a single structured API payload for a product or variant.
         """
@@ -311,6 +335,8 @@ class PayloadsGenerator:
         }
 
         tokens = self.__estimate_tokens(system_instructions, user_prompt, product_img_urls, output_schema)
+        print(f"Estimated input payload tokens = {tokens}")
+        self.total_tokens += tokens
 
         return payload
     
@@ -321,8 +347,5 @@ class PayloadsGenerator:
         tokens += len(self.encoder.encode(user_prompt))
         tokens += 85 * len(product_img_urls)        # 85 tokens limit if image 'detail' is set to 'low'
         tokens += len(self.encoder.encode(str(output_schema)))
-
-        print(f"Estimated input payload tokens = {tokens}")
-        self.total_tokens += tokens
 
         return tokens

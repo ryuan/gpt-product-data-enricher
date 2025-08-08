@@ -4,10 +4,11 @@ import json
 import time
 import sys
 from typing import Dict
+from pprint import pprint
 
 
 class BatchManager:
-    def __init__(self, client: OpenAI, endpoint: str, model: str, batch_payloads_path: str, batch_results_path: str):
+    def __init__(self, client: OpenAI, endpoint: str, model: str, batch_payloads_path: str, batch_results_path: str, batch_outputs_path: str):
         self.client = client
         self.endpoint = endpoint
         self.model = model
@@ -15,13 +16,18 @@ class BatchManager:
         # Create any missing parent directories
         os.makedirs(os.path.dirname(batch_payloads_path), exist_ok=True)
         os.makedirs(os.path.dirname(batch_results_path), exist_ok=True)
+        os.makedirs(os.path.dirname(batch_outputs_path), exist_ok=True)
         self.batch_payloads_path = batch_payloads_path
         self.batch_results_path = batch_results_path
+        self.batch_outputs_path = batch_outputs_path
         self.batch_payloads_file = open(batch_payloads_path, 'w', encoding='ascii')
 
         self.upload_response = None
         self.batch = None
         self.results = None
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.total_tokens = 0
 
     def write(self, payload: Dict):
         self.batch_payloads_file.write((json.dumps(payload, ensure_ascii=True) + '\n'))
@@ -87,3 +93,33 @@ class BatchManager:
             f.write(self.results.text)
             print(f"Results saved to {self.batch_results_path}")
 
+        with open(self.batch_results_path, 'r', encoding='ascii') as results_f:
+            with open(self.batch_outputs_path, 'w', encoding='ascii') as outputs_f:
+                for line in results_f:
+                    if line.strip():  # Skip empty lines
+                        try:
+                            result = json.loads(line)
+                            object_id= result['custom_id']
+                            output: Dict = json.loads(result['response']['body']['output'][0]['content'][0]['text'])
+                            structured_line_json = {object_id: output}
+                            outputs_f.write(json.dumps(structured_line_json, ensure_ascii=True) + "\n")
+                            self.__update_token_usage(result)
+                        except json.JSONDecodeError as e:
+                            print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
+
+    def print_token_usage(self):
+        usage_summary = {
+            'input_tokens': self.input_tokens,
+            'output_tokens': self.output_tokens,
+            'total_tokens': self.total_tokens
+        }
+
+        print("Total tokens used in batch: ")
+        pprint(usage_summary)
+
+    def __update_token_usage(self, result: Dict):
+        usage = result['response']['body']['usage']
+
+        self.input_tokens += usage['input_tokens']
+        self.output_tokens += usage['output_tokens']
+        self.total_tokens += usage['total_tokens']
