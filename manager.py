@@ -3,7 +3,7 @@ import os
 import json
 import time
 import sys
-from typing import Dict
+from typing import List, Dict
 from pprint import pprint
 
 
@@ -85,6 +85,17 @@ class BatchManager:
         elif self.batch.errors:
             print(f"Batch job completed but with errors: {self.batch.errors}")
             sys.exit()
+        elif self.batch.error_file_id:
+            print(f"Batch job completed but there were errors with requests.")
+            self.results = self.client.files.content(self.batch.error_file_id)
+            for line in self.results.text.splitlines():
+                result = json.loads(line)
+
+                if result['response']['body']['error'] is not None:
+                    id = result['custom_id']
+                    error = result['response']['body']['error']['message']
+                    print(f"First detected error at ID {id}: {error}")
+                    sys.exit()
 
         print(f"Downloading results...")
         self.results = self.client.files.content(self.batch.output_file_id)
@@ -100,10 +111,17 @@ class BatchManager:
                         try:
                             result = json.loads(line)
                             object_id= result['custom_id']
-                            output: Dict = json.loads(result['response']['body']['output'][0]['content'][0]['text'])
-                            structured_line_json = {object_id: output}
-                            outputs_f.write(json.dumps(structured_line_json, ensure_ascii=True) + "\n")
-                            self.__update_token_usage(result)
+                            outputs: List[Dict] = result['response']['body']['output']
+
+                            for output in outputs:
+                                if 'content' in output.keys():
+                                    structured_output: Dict = json.loads(output['content'][0]['text'])
+                                    structured_line_json = {
+                                        'id': object_id,
+                                        'output': structured_output
+                                    }
+                                    outputs_f.write(json.dumps(structured_line_json, ensure_ascii=True) + "\n")
+                                    self.__update_token_usage(result)
                         except json.JSONDecodeError as e:
                             print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
 

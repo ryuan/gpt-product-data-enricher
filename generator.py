@@ -1,16 +1,17 @@
 import json
-import tiktoken
 import pandas as pd
-from typing import List, Dict, Union
+from typing import List, Dict
 from fragments import object_schema_reference
+from encoder import Encoder
 from manager import BatchManager
 from crawler import WebSearchTool
 
 
 class PayloadsGenerator:
-    def __init__(self, crawler: WebSearchTool, sku_col_name: str, 
+    def __init__(self, crawler: WebSearchTool, encoder: Encoder, sku_col_name: str, 
                  supplier_data_df: pd.DataFrame, store_data_df: pd.DataFrame, fields_data_df: pd.DataFrame, product_ids_skus: Dict):
         self.crawler: WebSearchTool = crawler
+        self.encoder: Encoder = encoder
         self.sku_col_name: str = sku_col_name
         # Inputs
         self.supplier_data_df: pd.DataFrame = supplier_data_df
@@ -23,8 +24,6 @@ class PayloadsGenerator:
         self.process_order_number: int = None
         self.resource_type: str = None
         self.batch_manager: BatchManager = None
-        self.total_tokens = 0
-        self.encoder: tiktoken.Encoding = None
 
     def generate_batch_payloads(self, process_order_number: int, batch_manager: BatchManager):
         """
@@ -34,8 +33,6 @@ class PayloadsGenerator:
         self.process_order_number = process_order_number
         self.resource_type = self.fields_data_df.loc[self.fields_data_df['Process Order Number'] == self.process_order_number, 'Resource'].iloc[0]
         self.batch_manager = batch_manager
-        self.total_tokens = 0
-        self.encoder = tiktoken.encoding_for_model(batch_manager.model)
         product_ids: List[str] = self.store_data_df.loc[self.store_data_df['id'].str.startswith('gid://shopify/Product/'), 'id'].to_list()
 
         for product_id in product_ids:
@@ -68,7 +65,7 @@ class PayloadsGenerator:
                             variant_id = variant_data['id']
                             self.__generate_single_payload(variant_id, product_data, variants_data, fields_to_extract, output_schema)
 
-        print(f"Estimated total tokens in batch {self.process_order_number} = {self.total_tokens}")
+        print(f"Estimated input tokens for batch {self.process_order_number} = {self.encoder.batch_tokens_estimate[self.process_order_number]}")
 
     def set_dependency_results(self):
         """
@@ -78,14 +75,14 @@ class PayloadsGenerator:
         self.dependency_results = {}
         dependency_fields = self.fields_data_df['Dependency'].dropna().unique()
 
-        with open(self.batch_manager.batch_results_path, 'r', encoding='ascii') as f:
+        with open(self.batch_manager.batch_outputs_path, 'r', encoding='ascii') as f:
             for line in f:
                 if line.strip():  # Skip empty lines
                     try:
-                        result = json.loads(line)
-                        product_id = result['custom_id']
+                        output: Dict = json.loads(line)
+                        product_id = output['id']
                         self.dependency_results[product_id] = {}
-                        outputs: Dict = json.loads(result['response']['body']['output'][0]['content'][0]['text'])
+                        outputs: Dict = output['output']
                         
                         for dependency_field in dependency_fields:
                             if dependency_field in outputs.keys():
@@ -105,7 +102,7 @@ class PayloadsGenerator:
             dependency_fields = fields_to_extract['Dependency'].dropna().unique()
 
             for dependency_field in dependency_fields:
-                if dependency_field in self.dependency_results[product_id].keys():
+                if dependency_field in self.dependency_results[product_id].keys():  # This ensures fields like Frame Color with dependency Framed is kept for furniture
                     if self.dependency_results[product_id][dependency_field] is not True:
                         fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
 
@@ -139,6 +136,7 @@ class PayloadsGenerator:
 
         fields = fields_to_extract['Field'].to_list()
         schema_properties = {}
+        definitions = {}
 
         for field in fields:
             field_value_structure = {}
@@ -148,19 +146,13 @@ class PayloadsGenerator:
             field_array_items = field_data['JSON Array Items']
             field_object_type = field_data['JSON Object Type']
 
-            if field == 'Pile Height':
-                print(f"field_type: {field_type}")
-                print(f"field_enum_values: {field_enum_values}")
-                print(f"field_array_items: {field_array_items}")
-                print(f"field_object_type: {field_object_type}")
-
             if field_type in ['string', 'number', 'boolean']:
                 field_value_structure['type'] = [field_type, 'null']
             elif field_type == 'enum':
                 field_value_structure['type'] = ['string', 'null']
                 field_value_structure['enum'] = json.loads(field_enum_values) + [None]
             elif field_type == 'object':
-                field_value_structure = object_schema_reference[field_object_type]
+                field_value_structure = { "$ref": f"#/$defs/{field_object_type}" }
             elif field_type == 'array':
                 field_value_structure['type'] = [field_type, 'null']
 
@@ -169,7 +161,7 @@ class PayloadsGenerator:
                 elif field_array_items == 'enum':
                     field_value_structure['items'] = {'enum': json.loads(field_enum_values) + [None]}
                 elif field_array_items == 'object':
-                    field_value_structure['items'] = object_schema_reference[field_object_type]
+                    field_value_structure['items'] = { "$ref": f"#/$defs/{field_object_type}" }
 
             schema_properties[field] = {
                 'type': 'object',
@@ -183,7 +175,17 @@ class PayloadsGenerator:
                 'additionalProperties': False
             }
 
-        schema = {'type': 'object', 'properties': schema_properties, 'required': fields, 'additionalProperties': False}
+            if not pd.isna(field_object_type):
+                for reference_schema in object_schema_reference[field_object_type]:
+                    definitions.update(reference_schema)
+
+        schema = {
+            'type': 'object', 
+            'properties': schema_properties, 
+            '$defs': definitions,
+            'required': fields, 
+            'additionalProperties': False
+        }
 
         return schema
 
@@ -192,13 +194,22 @@ class PayloadsGenerator:
         Built the prompt, generate the payload, then write to batch payloads JSONL file.
         """
 
-        print(f"Generating payload for {object_id}")
         product_type = product_data['productType']
         product_vendor = product_data['vendor']
-        product_img_urls = product_data['image/url']
+        img_urls: List = product_data['image/url']
+
+        # If process is for variant, position variant-specific image in front of image URLs list
+        if self.resource_type == 'Variant':
+            for variant_data in variants_data:
+                if variant_data['id'] == object_id and pd.notna(variant_data['image/url']):
+                    variant_img_url = variant_data['image/url']
+                    img_urls.pop(img_urls.index(variant_img_url))
+                    img_urls.insert(0, variant_img_url)
+
+        print(f"Generating payload for {object_id}")
         system_instructions = self.__compose_instructions(product_type, fields_to_extract)
         user_prompt = self.__compose_prompt(object_id, product_vendor, variants_data)
-        payload = self.__build_payload(object_id, system_instructions, user_prompt, product_img_urls, output_schema)        
+        payload = self.__build_payload(object_id, system_instructions, user_prompt, img_urls, output_schema)        
         self.batch_manager.write(payload)
 
     def __compose_instructions(self, product_type: str, fields_to_extract: pd.DataFrame) -> str:
@@ -209,26 +220,30 @@ class PayloadsGenerator:
         system_instructions = (
             "You are an expert product data analyst for a large home goods retailer like Wayfair. "
             "Your job is to extract standardized field values from supplier spreadsheet data and product images. "
-            "Every attribute from the supplier data should be carefully examined when evaluating each field. "
+            "Every attribute from the supplier data should be carefully examined when evaluating each field. \n\n"
             "Specific instructions and rules may be provided for certain fields — follow these exactly. "
             "Each field will be labeled as either 'Required' or 'Optional'. "
-            "'Required' fields must never be left null unless no reliable data exists — in such cases, include an appropriate warning. "
-            "'Optional' fields may be left null if no trustworthy value can be extracted. "
-            "Be aware that supplier data may include typos or errors. Cross-check all data sources to validate your decision. "
-            "When a value cannot be determined confidently and estimation could result in customer complaints, return null. "
+            "'Required' fields must never be null unless no reliable data exists — in such cases, include an appropriate warning. "
+            "'Optional' fields may be safely left null if no trustworthy value can be extracted. \n\n"
+            "Be aware that supplier data may include typos or errors. Cross-check data with images to validate your decision. "
+            "If you feel like the supplier made a mistake or their data is not supported by the images, include reasoning. "
+            "When a value cannot be determined confidently and estimation could result in customer complaints, return null. \n\n"
             "All output fields must match the schema specified in the request exactly — including naming, structure, and data type. "
-            "If no value is available, return null under value, but still include confidence and reasoning. "
+            "If no value can be extracted, return null for value, but still include confidence and reasoning. \n\n"
         )
 
         if self.resource_type == 'Variant':
             system_instructions += (
+                "For all dimension fields (width, depth, height, length), convert values to inches. "
+                "Always use width to measure side-to-side and depth to measure front-to-back. "
+                "Suppliers may define width, depth, and length differently, so verify orientation using images. "
                 "Never guess or create new dimension values based solely on image appearances. "
-                "However, you may reuse dimension values from supplier data if the label clearly maps to the intended field. "
-                "For example, the 'Clearance Height' of a coffee table may be used for the 'Leg Dimension' field if applicable. \n\n"
+                "However, you may reuse dimension values from supplier data if the data can safely map to another field. "
+                "For example, 'Clearance Height' of a coffee table may be used for 'Leg Dimension' field if it's a simple table with no shelves and just legs. \n\n"
             )
 
         # Fields to extract along with notes and requirement of each field
-        user_prompt += "Here are the fields you'll be extracting data to. Follow any notes if specified for a specific field: \n"
+        system_instructions += "Here are the fields you'll be extracting data to, with requirement and instructions for each: \n"
 
         fields_data = fields_to_extract[['Field', 'Notes', product_type]].to_dict(orient='records')
 
@@ -237,13 +252,8 @@ class PayloadsGenerator:
             notes = field_data['Notes']
             requirement = field_data[product_type]
 
-            prompt_fragment = (
-                f"Field Name: {field} \n"
-                f"Notes: {notes if not pd.isna(notes) else 'None'} \n"
-                f"Required or Optional?: {requirement} \n\n"
-            )
-
-            user_prompt += prompt_fragment
+            field_fragment = f"- {field}: {requirement}. {notes if not pd.isna(notes) else ''} \n"
+            system_instructions += field_fragment
 
         return system_instructions
 
@@ -253,62 +263,71 @@ class PayloadsGenerator:
         """
 
         user_prompt = (
-            f"Extract the fields specified in the 'fields_to_extract' object (provided separately in the input). \n"
-            f"Use all sources of data: the supplier-provided attributes (in bullet format) and images provided in the payload. \n"
+            f"Extract the data as structured output for the fields specified in the request payload and system instructions. "
+            f"Use all sources of data: the supplier-provided attributes (in bullet format) and provided images. \n\n"
         )
 
         # If the current process is for one of many variants, then warn system that not all images are for this variant. 
         if self.resource_type == 'Variant' and len(variants_data) > 1:
             user_prompt += (
-                "Note: The images provided are for the product family this SKU belongs to, and may or may not depict this specific SKU or variant. \n"
-                "Make sure that an image is relevant to this SKU before using it to extract data. \n"
+                "Note: The images provided are for the product this SKU belongs to, and may or may not depict this specific SKU/variant. "
+                "You should still review and make use of all the images - just make sure any data that you extract from an image is accurate for the SKU. \n\n"
             )
 
-        # Supplier and web search result data for the product's variant(s)
+        # Introduce the SKUs (and vendor) that the system will extract data for.
         if self.resource_type == 'Product' and len(variants_data) > 1:
             skus = [variant_data['sku'] for variant_data in variants_data]
 
             user_prompt += (
                 f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. \n"
                 "The fields that you're expected to extract data for are at the product level and will apply to all of the SKUs. \n"
-                "Here are the supplier data and web search result data (if any) for each SKU: \n\n"
+                "Here are the supplier data for each SKU: \n\n"
             )
         else:
+            if self.resource_type == 'Product':
+                sku = variants_data[0]['sku']
+            else:
+                for variant_data in variants_data:
+                    if variant_data['id'] == object_id:
+                        sku = variant_data['sku']
+
             user_prompt += (
-                f"You will review data for SKU {variants_data[0]['sku']} by our supplier {product_vendor}. \n"
-                "Here is the supplier data and web search result data (if any): \n\n"
+                f"You will review data for SKU {sku} by our supplier {product_vendor}. \n"
+                "Here is the supplier data for this SKU: \n\n"
             )
 
+        # Supplier and web search result data for the variant(s)
         for variant_data in variants_data:
             if self.resource_type == 'Product' or (self.resource_type == 'Variant' and variant_data['id'] == object_id):
-                user_prompt += f"SKU: {variant_data['sku']} \n"
+                user_prompt += f"=== SKU: {variant_data['sku']} ===\n"
                 if not pd.isna(variant_data['image/url']):
-                    user_prompt += f"SKU Specific Image URL: {variant_data['image/url']} \n"
+                    user_prompt += f"SKU-Specific Image URL: {variant_data['image/url']} \n"
                 for key, value in variant_data['supplier_data'].items():
                     if key is not self.sku_col_name:
-                        user_prompt += f"{key}: {value} \n"
+                        cleaned_key = key.replace(":", "")
+                        user_prompt += f"{cleaned_key}: {value} \n"
                 for key, value in variant_data['web_data'].items():
                     if value is not variant_data['sku']:
-                        user_prompt += f"{key}: {value} \n"
+                        cleaned_key = key.replace(":", "")
+                        user_prompt += f"{cleaned_key}: {value} \n"
+                user_prompt += "\n"
 
         return user_prompt
 
-    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, product_img_urls: List[str], output_schema: Dict) -> Dict:
+    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, img_urls: List[str], output_schema: Dict) -> Dict:
         """
         Construct a single structured API payload for a product or variant.
         """
 
-        input_img_json_objects = []
+        content = [{'type': 'input_text', 'text': user_prompt}]
 
-        for product_img_url in product_img_urls:
-            product_img_json_object = {
+        for img_url in img_urls:
+            img_url_json_object = {
                 'type': 'input_image',
-                'image_url': product_img_url,
+                'image_url': img_url,
                 'detail': 'low'
             }
-            input_img_json_objects.append(product_img_json_object)
-
-        content = [{'type': 'input_text', 'text': user_prompt}] + input_img_json_objects
+            content.append(img_url_json_object)
 
         payload = {
             'custom_id': object_id,
@@ -334,18 +353,7 @@ class PayloadsGenerator:
             }
         }
 
-        tokens = self.__estimate_tokens(system_instructions, user_prompt, product_img_urls, output_schema)
+        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, img_urls, output_schema)
         print(f"Estimated input payload tokens = {tokens}")
-        self.total_tokens += tokens
 
         return payload
-    
-    def __estimate_tokens(self, system_instructions: str, user_prompt: str, product_img_urls: List[str], output_schema: Dict) -> int:
-        tokens = 0
-
-        tokens += len(self.encoder.encode(system_instructions))
-        tokens += len(self.encoder.encode(user_prompt))
-        tokens += 85 * len(product_img_urls)        # 85 tokens limit if image 'detail' is set to 'low'
-        tokens += len(self.encoder.encode(str(output_schema)))
-
-        return tokens

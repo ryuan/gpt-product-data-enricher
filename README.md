@@ -1,10 +1,10 @@
 # GPT Product Data Enricher
 
-**Enrich, enhance, and normalize ecommerce product data using GPT-4o.**
+**Enrich, enhance, and normalize ecommerce product data using GPT-5.**
 
 The program ingests data from 3 sources - tabular CSV data from suppliers, product images, and crawled website data from suppliers. It then processes all the data, mapping them to standardized fields, while adding, omitting, and modifying (both rewriting and normalizing) data for accuracy, originality, and filterability.
 
-The program leverages the Batch API for cost efficiency, as well as the new Responses API endpoint to take advantage of capabilities like ascynchronous Web Search to fetch even more data for each payload processed within a batch. Currently supports Shopify data structures only (GraphQL query results).
+The program leverages the Batch API for cost efficiency, as well as the new Responses API endpoint to take advantage of capabilities like ascynchronous Web Search to fetch even more data for each payload processed within a batch. Currently only supports Shopify GraphQL query results as input data.
 
 Featuring context-based, sequential batch processing, the program aims to transform tabular data into structured results that maintain reasoning fidelity and deep logic while reducing hallucinations and cognitive load.
 
@@ -27,6 +27,7 @@ Featuring context-based, sequential batch processing, the program aims to transf
 - [ ] Heuristic QA flagging
 - [ ] Prepare Shopify GraphQL mutation inputs
 - [ ] Audit log
+- [ ] Add required inputs/formats to README
 
 ## Notes
 

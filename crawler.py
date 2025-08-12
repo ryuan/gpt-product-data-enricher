@@ -34,13 +34,13 @@ class WebSearchTool:
                     self.web_search_results[variant_data['id']] = variant_data['output']
         elif choice_idx == 2:
             self.web_search_results_file = open(self.web_search_results_path, 'w', encoding='ascii')
-            self.__execute_write_web_searches()
+            self.__execute_web_searches()
             self.web_search_results_file.close()
         else:
             print("Your input was not one of the valid options. Please rerun program and try again.")
             sys.exit()
 
-    def __execute_write_web_searches(self):
+    def __execute_web_searches(self):
         product_ids: List[str] = self.store_data_df.loc[self.store_data_df['id'].str.startswith('gid://shopify/Product/'), 'id'].to_list()
 
         for product_id in product_ids:
@@ -52,11 +52,12 @@ class WebSearchTool:
             ].to_dict(orient='records')
 
             for variant_data in variants_data:
-                response = self.__execute_single_web_search(product_vendor, variant_data['sku'])
+                response = self.__call_web_search(product_vendor, variant_data['sku'])
                 self.web_search_results[variant_data['id']] = response
                 self.__write(variant_data['id'], response)
-    def __execute_single_web_search(self, product_vendor: str, sku: str) -> Dict:
-        system_instructions, user_prompt = self.__build_instructions_prompt(sku, product_vendor)
+
+    def __call_web_search(self, product_vendor: str, sku: str) -> Dict:
+        system_instructions, user_prompt = self.__compose_instructions_prompt(sku, product_vendor)
         output_schema = self.__build_output_schema()
 
         response = self.client.responses.parse(
@@ -76,7 +77,7 @@ class WebSearchTool:
 
         return response.output[1].content[0].text
 
-    def __build_instructions_prompt(self, sku: str, product_vendor: str) -> Tuple[str, str]:
+    def __compose_instructions_prompt(self, sku: str, product_vendor: str) -> Tuple[str, str]:
         system_instructions = (
             "You are a product data analyst with access to web search. "
             "You will perform web search only on the supplier's official website and subdomains to verify or extract structured product data."
