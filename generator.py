@@ -167,11 +167,12 @@ class PayloadsGenerator:
                 'type': 'object',
                 'properties': {
                     'reasoning': {'type': 'string'},
-                    'confidence': {'enum': ['low', 'medium', 'high']},
+                    'confidence': {'type': ['string', 'null'], 'enum': ['low', 'medium', 'high', None]},
                     'warning': {'type': ['string', 'null']},
+                    'source': {'type': ['string', 'null'], 'enum': ['supplier data', 'image', 'both', 'inferred', None]},
                     'value': field_value_structure,
                 },
-                'required': ['value', 'confidence', 'reasoning', 'warning'],
+                'required': ['reasoning', 'confidence', 'warning', 'source', 'value'],
                 'additionalProperties': False
             }
 
@@ -212,48 +213,68 @@ class PayloadsGenerator:
         payload = self.__build_payload(object_id, system_instructions, user_prompt, img_urls, output_schema)        
         self.batch_manager.write(payload)
 
+        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, img_urls, output_schema)
+        print(f"Estimated input payload tokens = {tokens}")
+
     def __compose_instructions(self, product_type: str, fields_to_extract: pd.DataFrame) -> str:
         """
         Compose system instructions for a product or variant payload.
         """
 
         system_instructions = (
-            "You are an expert product data analyst for a large home goods retailer like Wayfair. "
-            "Your job is to extract standardized field values from supplier spreadsheet data and product images. "
-            "Every attribute from the supplier data should be carefully examined when evaluating each field. \n\n"
-            "Specific instructions and rules may be provided for certain fields — follow these exactly. "
-            "Each field will be labeled as either 'Required' or 'Optional'. "
-            "'Required' fields must never be null unless no reliable data exists — in such cases, include an appropriate warning. "
-            "'Optional' fields may be safely left null if no trustworthy value can be extracted. \n\n"
-            "Be aware that supplier data may include typos or errors. Cross-check data with images to validate your decision. "
-            "If you feel like the supplier made a mistake or their data is not supported by the images, include reasoning. "
-            "When a value cannot be determined confidently and estimation could result in customer complaints, return null. \n\n"
-            "All output fields must match the schema specified in the request exactly — including naming, structure, and data type. "
-            "If no value can be extracted, return null for value, but still include confidence and reasoning. \n\n"
+            "# Role and Objective\n"
+            "- Act as an expert product data analyst for a large home goods retailer, specializing in extracting standardized field values from supplier spreadsheets and product images.\n"
+            "\n"
+            "# Instructions\n"
+            "- Extract every field listed below from the supplier data and images, adhering strictly to provided rules and definitions for each field.\n"
+            "- Carefully evaluate each attribute in the supplier data, verifying against images to ensure accuracy.\n"
+            "- Handle typos, inconsistencies, or contradictions by cross-checking between sources, prioritizing image data when supplier data is clearly incorrect or unsupported.\n"
+            "- The supplier data and images are equally important for extracting data unless specifically noted in a field's notes.\n"
+            "- Only return null for Required fields if no trustworthy data exists; in such cases, provide a warning message.\n"
+            "- Optional fields may be left null if data is untrustworthy or you lack confidence in your extracted value, with a brief explanation when feasible.\n"
+            "- All field outputs must exactly match the requested structured output schema in naming, structure, data type, and order.\n"
         )
 
         if self.resource_type == 'Variant':
             system_instructions += (
-                "For all dimension fields (width, depth, height, length), convert values to inches. "
-                "Always use width to measure side-to-side and depth to measure front-to-back. "
-                "Suppliers may define width, depth, and length differently, so verify orientation using images. "
-                "Never guess or create new dimension values based solely on image appearances. "
-                "However, you may reuse dimension values from supplier data if the data can safely map to another field. "
-                "For example, 'Clearance Height' of a coffee table may be used for 'Leg Dimension' field if it's a simple table with no shelves and just legs. \n\n"
+                "- For dimension fields, always convert measurements to inches and use width for side-to-side and depth for front-to-back; verify each dimension's orientation using images.\n"
+                "- Do not estimate values unless confident enough to avoid potential customer complaints; when in doubt, return null and explain.\n"
+                "- Reuse dimension values from supplier data for other fields only when logically justified and consistent with product attributes.\n"
             )
 
         # Fields to extract along with notes and requirement of each field
-        system_instructions += "Here are the fields you'll be extracting data to, with requirement and instructions for each: \n"
+        system_instructions += "\n"
+        system_instructions += "# Field Extraction Details\n"
 
         fields_data = fields_to_extract[['Field', 'Notes', product_type]].to_dict(orient='records')
+        counter = 0
 
         for field_data in fields_data:
             field = field_data['Field']
             notes = field_data['Notes']
             requirement = field_data[product_type]
+            counter += 1
 
-            field_fragment = f"- {field}: {requirement}. {notes if not pd.isna(notes) else ''} \n"
-            system_instructions += field_fragment
+            field_fragment = f"{counter}. **{field}** ({requirement})"
+
+            if pd.notna(notes):
+                field_fragment += f": {notes}"
+                
+            system_instructions += field_fragment + "\n"
+
+        system_instructions += (
+            "\n"
+            "# Output Format\n"
+            "For each field, output an object with:\n"
+            "- `reasoning`: Brief explanation of your decision, validation, and data source\n"
+            "- `confidence`: One of 'low', 'medium', or 'high'\n"
+            "- `warning`: Required only if value is null and field is Required. Description of the issue\n"
+            "- `source`: One of 'supplier data', 'image', 'both', or 'inferred', indicating the primary data source\n"
+            "- `value`: Extracted number, string, array, object, or null (if unsure or insufficient data)\n"
+            "\n"
+            "# Stop Conditions\n"
+            "- Complete all requested fields per schema and requirements before outputting results; escalate for clarification if critical schema or data is missing or ambiguous."
+        )
 
         return system_instructions
 
@@ -263,25 +284,16 @@ class PayloadsGenerator:
         """
 
         user_prompt = (
-            f"Extract the data as structured output for the fields specified in the request payload and system instructions. "
-            f"Use all sources of data: the supplier-provided attributes (in bullet format) and provided images. \n\n"
+            f"Extract the data as structured output for the fields specified in the request payload and system instructions.\n\n"
         )
-
-        # If the current process is for one of many variants, then warn system that not all images are for this variant. 
-        if self.resource_type == 'Variant' and len(variants_data) > 1:
-            user_prompt += (
-                "Note: The images provided are for the product this SKU belongs to, and may or may not depict this specific SKU/variant. "
-                "You should still review and make use of all the images - just make sure any data that you extract from an image is accurate for the SKU. \n\n"
-            )
 
         # Introduce the SKUs (and vendor) that the system will extract data for.
         if self.resource_type == 'Product' and len(variants_data) > 1:
             skus = [variant_data['sku'] for variant_data in variants_data]
 
             user_prompt += (
-                f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. \n"
-                "The fields that you're expected to extract data for are at the product level and will apply to all of the SKUs. \n"
-                "Here are the supplier data for each SKU: \n\n"
+                f"The product you're reviewing consists of {len(variants_data)} variants. Their SKUs are: {skus}. "
+                "The fields that you're expected to extract data for are at the product level and will be relevant to all of the SKUs.\n\n"
             )
         else:
             if self.resource_type == 'Product':
@@ -292,24 +304,32 @@ class PayloadsGenerator:
                         sku = variant_data['sku']
 
             user_prompt += (
-                f"You will review data for SKU {sku} by our supplier {product_vendor}. \n"
-                "Here is the supplier data for this SKU: \n\n"
+                f"You will review data for SKU {sku} by our supplier {product_vendor}. \n\n"
+            )
+
+        # If the current process is for one of many variants, then warn system that not all images are for this variant. 
+        if self.resource_type == 'Variant' and len(variants_data) > 1:
+            user_prompt += (
+                "Note: The images provided are for the product this SKU belongs to, and may or may not depict this specific SKU/variant. "
+                "You should still review and make use of all the images - just make sure any data that you extract from an image is appropriate for the SKU.\n\n"
             )
 
         # Supplier and web search result data for the variant(s)
+        user_prompt += "# Supplier Data"
+
         for variant_data in variants_data:
             if self.resource_type == 'Product' or (self.resource_type == 'Variant' and variant_data['id'] == object_id):
-                user_prompt += f"=== SKU: {variant_data['sku']} ===\n"
+                user_prompt += f"## SKU: {variant_data['sku']}\n"
                 if not pd.isna(variant_data['image/url']):
-                    user_prompt += f"SKU-Specific Image URL: {variant_data['image/url']} \n"
+                    user_prompt += f"- **Specific image URL**: {variant_data['image/url']} \n"
                 for key, value in variant_data['supplier_data'].items():
                     if key is not self.sku_col_name:
                         cleaned_key = key.replace(":", "")
-                        user_prompt += f"{cleaned_key}: {value} \n"
+                        user_prompt += f"- **{cleaned_key}**: {value}\n"
                 for key, value in variant_data['web_data'].items():
                     if value is not variant_data['sku']:
                         cleaned_key = key.replace(":", "")
-                        user_prompt += f"{cleaned_key}: {value} \n"
+                        user_prompt += f"- **{cleaned_key}**: {value}\n"
                 user_prompt += "\n"
 
         return user_prompt
@@ -335,6 +355,9 @@ class PayloadsGenerator:
             'url': self.batch_manager.endpoint,
             'body': {
                 'model': self.batch_manager.model,
+                'reasoning': {
+                    'effort': 'medium'
+                },
                 'instructions': system_instructions,
                 'input': [
                     {
@@ -348,12 +371,10 @@ class PayloadsGenerator:
                         'name': 'fields_extracted_response',
                         'strict': True,
                         'schema': output_schema
-                    }
+                    },
+                    'verbosity': 'low'
                 }
             }
         }
-
-        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, img_urls, output_schema)
-        print(f"Estimated input payload tokens = {tokens}")
 
         return payload
