@@ -1,64 +1,68 @@
-single_dimension_schema = {
-    'single_dimension': {
+dimension_schema = {
+    # Conforms to GraphQL format for 'Dimension' data type
+    'dimension': {
         'type': ['object', 'null'],
         'properties': {
-            'unit': {'enum': ['INCHES', 'FEET']},
-            'value': {'type': ['array', 'null'], 'items': {'type': 'number', 'minimum': 0}, 'minItems': 1}
+            'unit': {'enum': ['INCHES']},
+            'value': {'type': 'number', 'minimum': 0}
         },
         'required': ['unit', 'value'],
         'additionalProperties': False
     }
 }
-dimension_schema = {
-    'dimension': {
+dimensions_schema = {
+    # Custom format referencing GraphQL format for 'Dimension' data type
+    'dimensions': {
         'type': ['object', 'null'],
         'properties': {
-            'unit': {'enum': ['INCHES', 'FEET']},
-            'width': {'type': ['array', 'null'], 'items': {'type': 'number', 'minimum': 0}, 'minItems': 1},
-            'depth': {'type': ['array', 'null'], 'items': {'type': 'number', 'minimum': 0}, 'minItems': 1},
-            'height': {'type': ['array', 'null'], 'items': {'type': 'number', 'minimum': 0}, 'minItems': 1}
+            'width': {'type': ['array', 'null'], 'items': { '$ref': '#/$defs/dimension' }, 'minItems': 1},
+            'depth': {'type': ['array', 'null'], 'items': { '$ref': '#/$defs/dimension' }, 'minItems': 1},
+            'height': {'type': ['array', 'null'], 'items': { '$ref': '#/$defs/dimension' }, 'minItems': 1}
         },
-        'required': ['unit', 'width', 'depth', 'height'],
+        'required': ['width', 'depth', 'height'],
         'additionalProperties': False
     }
 }
-dimension_sets_schema = {
-    'dimension_sets': {
+dimensions_sets_schema = {
+    # Custom format referencing another custom format
+    'dimensions_sets': {
         'type': ['object', 'null'],
         'properties': {
             'name': {'type': 'string', 'pattern': '\\S+'},
-            'dimension': {'type': 'array', 'items': { "$ref": "#/$defs/dimension" }, 'minItems': 1}
+            'dimensions': {'type': 'array', 'items': { '$ref': '#/$defs/dimensions' }, 'minItems': 1}
         },
-        'required': ['name', 'dimension'],
+        'required': ['name', 'dimensions'],
         'additionalProperties': False
     }
 }
 weight_schema = {
+    # Conforms to GraphQL format for 'Weight' data type
     'weight': {
         'type': ['object', 'null'],
         'properties': {
-            'unit': {'enum': ['OUNCE', 'POUND']},
-            'value': {'type': ['array', 'null'], 'items': {'type': 'number', 'minimum': 0}, 'minItems': 1}
+            'unit': {'enum': ['OUNCES', 'POUNDS']},
+            'value': {'type': 'number', 'minimum': 0}
         },
         'required': ['unit', 'value'],
         'additionalProperties': False
     }
 }
 package_measurement_schema = {
+    # Custom format referencing both another custom format and GraphQL format for 'Weight' data type
     'package_measurement': {
         'type': ['object', 'null'],
         'properties': {
-            'dimension': { "$ref": "#/$defs/dimension" },
-            'weight': { "$ref": "#/$defs/weight" }
+            'dimensions': { '$ref': '#/$defs/dimensions' },
+            'weight': { '$ref': '#/$defs/weight' }
         },
-        'required': ['dimension', 'weight'],
+        'required': ['dimensions', 'weight'],
         'additionalProperties': False
     }
 }
 object_schema_reference = {
-    'dimension_sets': [dimension_sets_schema, dimension_schema],
+    'dimensions_sets': [dimensions_sets_schema, dimensions_schema],
+    'dimensions': [dimensions_schema],
     'dimension': [dimension_schema],
-    'single_dimension': [single_dimension_schema],
     'weight': [weight_schema],
-    'package_measurement': [package_measurement_schema, dimension_schema, weight_schema]
+    'package_measurement': [package_measurement_schema, dimensions_schema, weight_schema]
 }

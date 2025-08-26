@@ -1,39 +1,49 @@
 import json
+import utils
 import pandas as pd
 from typing import List, Dict
 from fragments import object_schema_reference
 from encoder import Encoder
 from manager import BatchManager
 from crawler import WebSearchTool
+from tag_parsor import optimize_notes
 
 
 class PayloadsGenerator:
-    def __init__(self, crawler: WebSearchTool, encoder: Encoder, sku_col_name: str, 
-                 supplier_data_df: pd.DataFrame, store_data_df: pd.DataFrame, fields_data_df: pd.DataFrame, product_ids_skus: Dict):
+    def __init__(self, crawler: WebSearchTool, encoder: Encoder, batch_manager: BatchManager, 
+                 supplier_data_df: pd.DataFrame, store_data_df: pd.DataFrame, fields_data_df: pd.DataFrame):
         self.crawler: WebSearchTool = crawler
         self.encoder: Encoder = encoder
-        self.sku_col_name: str = sku_col_name
+        self.batch_manager: BatchManager = batch_manager
+        self.sku_col_name: str = self.__get_sku_col_name(supplier_data_df)
         # Inputs
         self.supplier_data_df: pd.DataFrame = supplier_data_df
         self.store_data_df: pd.DataFrame = store_data_df
         self.fields_data_df: pd.DataFrame = fields_data_df
         # References
-        self.product_ids_skus: Dict = product_ids_skus
         self.dependency_results: Dict = {}
         # Per-process Variables
         self.process_order_number: int = None
         self.resource_type: str = None
-        self.batch_manager: BatchManager = None
 
-    def generate_batch_payloads(self, process_order_number: int, batch_manager: BatchManager):
+    def __get_sku_col_name(self, supplier_data_df) -> str:
+        # Get column name representing column data for SKU from the supplier data CSV/XLSX
+        headers = list(supplier_data_df)
+        utils.print_options(headers)
+        sku_idx = int(input(f"Which name represents column data for SKU?: "))
+        sku_col_name = headers[sku_idx]
+        return sku_col_name
+
+    def generate_batch_payloads(self, process_order_number: int) -> None:
         """
         Generate a list of request payloads for each SKU in the supplier CSV with product images.
         """
 
         self.process_order_number = process_order_number
         self.resource_type = self.fields_data_df.loc[self.fields_data_df['Process Order Number'] == self.process_order_number, 'Resource'].iloc[0]
-        self.batch_manager = batch_manager
         product_ids: List[str] = self.store_data_df.loc[self.store_data_df['id'].str.startswith('gid://shopify/Product/'), 'id'].to_list()
+
+        self.batch_manager.create_batch_files(self.process_order_number)
 
         for product_id in product_ids:
             product_data: Dict = self.store_data_df.loc[
@@ -75,7 +85,7 @@ class PayloadsGenerator:
         self.dependency_results = {}
         dependency_fields = self.fields_data_df['Dependency'].dropna().unique()
 
-        with open(self.batch_manager.batch_outputs_path, 'r', encoding='ascii') as f:
+        with open(self.batch_manager.current_batch_files.batch_outputs_path, 'r', encoding='ascii') as f:
             for line in f:
                 if line.strip():  # Skip empty lines
                     try:
@@ -233,11 +243,15 @@ class PayloadsGenerator:
             "- Only return null for Required fields if no trustworthy data exists; in such cases, provide a warning message.\n"
             "- Optional fields may be left null if data is untrustworthy or you lack confidence in your extracted value, with a brief explanation when feasible.\n"
             "- All field outputs must exactly match the requested structured output schema in naming, structure, data type, and order.\n"
+            "- Always use American English spelling and writing style.\n"
+            "- For outputs in string format, always use ASCII characters only.\n"
         )
 
         if self.resource_type == 'Variant':
             system_instructions += (
-                "- For dimension fields, always convert measurements to inches and use width for side-to-side and depth for front-to-back; verify each dimension's orientation using images.\n"
+                "- For dimension fields, always convert measurements to inches.\n"
+                "- We define width as side-to-side measurement and depth as front-to-back measurement.\n"
+                "- Verify the supplier's orientation for width, depth, or length using images since they might differ from our definition.\n"
                 "- Do not estimate values unless confident enough to avoid potential customer complaints; when in doubt, return null and explain.\n"
                 "- Reuse dimension values from supplier data for other fields only when logically justified and consistent with product attributes.\n"
             )
@@ -247,6 +261,7 @@ class PayloadsGenerator:
         system_instructions += "# Field Extraction Details\n"
 
         fields_data = fields_to_extract[['Field', 'Notes', product_type]].to_dict(orient='records')
+        field_names = self.fields_data_df.loc[self.fields_data_df[product_type].notna(), 'Field'].to_list()
         counter = 0
 
         for field_data in fields_data:
@@ -258,7 +273,8 @@ class PayloadsGenerator:
             field_fragment = f"{counter}. **{field}** ({requirement})"
 
             if pd.notna(notes):
-                field_fragment += f": {notes}"
+                optimized_notes = optimize_notes(notes, field_names)
+                field_fragment += f": {optimized_notes}"
                 
             system_instructions += field_fragment + "\n"
 
