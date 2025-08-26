@@ -20,12 +20,10 @@ Featuring context-based, sequential batch processing, the program aims to transf
 - [x] Output response schema design
 - [x] Input payload construction
 - [x] Sequential batch payloads processing
-- [ ] Chunk sequential batches by token limits
-- [ ] Unify chunked outputs for each sequence
 - [x] Format and save responses as JSONL
-- [ ] Validate and parse result JSONL
+- [x] Validate and parse result JSONL
+- [x] Merge outputs to XLSX for easy GraphQL mutation
 - [ ] Heuristic QA flagging
-- [ ] Prepare Shopify GraphQL mutation inputs
 - [ ] Audit log
 - [ ] Add required inputs/formats to README
 
