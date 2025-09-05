@@ -8,7 +8,7 @@ from crawler import WebSearchTool
 
 def main():
     client = utils.init()
-    endpoint = '/v1/responses'
+    endpoint = utils.set_endpoint()
     model = 'gpt-5'
     date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -40,6 +40,8 @@ def main():
             # Poll status of batch execution, downloading the output JSONL results upon completion
             batch_manager.poll_batch_until_complete()
             batch_manager.download_batch_results()
+            batch_manager.update_error_ids()
+            batch_manager.save_outputs_from_batch_results()
             batch_manager.print_token_usage()
 
             # If this is the first process order sequence, read the results output to fetch dependency field booleans for each processed SKU

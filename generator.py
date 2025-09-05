@@ -2,6 +2,7 @@ import json
 import utils
 import pandas as pd
 from typing import List, Dict
+from urllib.parse import urlparse, urlunparse
 from fragments import object_schema_reference
 from encoder import Encoder
 from manager import BatchManager
@@ -42,6 +43,9 @@ class PayloadsGenerator:
         self.process_order_number = process_order_number
         self.resource_type = self.fields_data_df.loc[self.fields_data_df['Process Order Number'] == self.process_order_number, 'Resource'].iloc[0]
         product_ids: List[str] = self.store_data_df.loc[self.store_data_df['id'].str.startswith('gid://shopify/Product/'), 'id'].to_list()
+
+        # Exclude any product IDs with errors in previous batch processes
+        product_ids = [item for item in product_ids if item not in self.batch_manager.error_ids]
 
         self.batch_manager.create_batch_files(self.process_order_number)
 
@@ -355,21 +359,18 @@ class PayloadsGenerator:
         Construct a single structured API payload for a product or variant.
         """
 
-        content = [{'type': 'input_text', 'text': user_prompt}]
+        if 'responses' in self.batch_manager.endpoint:
+            content = [{'type': 'input_text', 'text': user_prompt}]
 
-        for img_url in img_urls:
-            img_url_json_object = {
-                'type': 'input_image',
-                'image_url': img_url,
-                'detail': 'low'
-            }
-            content.append(img_url_json_object)
+            for img_url in img_urls:
+                img_url_json_object = {
+                    'type': 'input_image',
+                    'image_url': img_url,
+                    'detail': 'low'
+                }
+                content.append(img_url_json_object)
 
-        payload = {
-            'custom_id': object_id,
-            'method': 'POST',
-            'url': self.batch_manager.endpoint,
-            'body': {
+            body = {
                 'model': self.batch_manager.model,
                 'reasoning': {
                     'effort': 'medium'
@@ -391,6 +392,48 @@ class PayloadsGenerator:
                     'verbosity': 'low'
                 }
             }
+        else:
+            content = [{'type': 'text', 'text': user_prompt}]
+
+            for img_url in img_urls:
+                img_url_json_object = {
+                    'type': 'image_url',
+                    'image_url': {
+                        'url': img_url,
+                        'detail': 'low'
+                    },
+                }
+                content.append(img_url_json_object)
+
+            body = {
+                'model': self.batch_manager.model,
+                'reasoning_effort': 'medium',
+                'messages': [
+                    {
+                        'role': 'developer',
+                        'content': system_instructions
+                    },
+                    {
+                        'role': 'user',
+                        'content': content
+                    }
+                ],
+                'response_format': {
+                    'type': 'json_schema',
+                    'json_schema': {
+                        'name': 'fields_extracted_response',
+                        'strict': True,
+                        'schema': output_schema
+                    }
+                },
+                'verbosity': 'low'
+            }
+
+        payload = {
+            'custom_id': object_id,
+            'method': 'POST',
+            'url': self.batch_manager.endpoint,
+            'body': body
         }
 
         return payload

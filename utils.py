@@ -22,6 +22,12 @@ def init() -> OpenAI:
 
     return client
 
+def set_endpoint() -> str:
+    endpoints = ['/v1/responses', '/v1/chat/completions']
+    print_options(endpoints)
+    idx = int(input("Which endpoint would you like to use with the Batch API? "))
+    return endpoints[idx]
+
 ### Pre-processing and setup functions
 
 def get_source_paths() -> List[str]:
