@@ -1,4 +1,7 @@
 import json
+import base64
+import mimetypes
+import requests
 import utils
 import pandas as pd
 from typing import List, Dict
@@ -221,14 +224,43 @@ class PayloadsGenerator:
                     img_urls.pop(img_urls.index(variant_img_url))
                     img_urls.insert(0, variant_img_url)
 
+        # Convert image URLs to URIs with base64 encoded image and MIME type (this helps avoids URL inaccessible errors)
+        b64_img_uris = self.__get_base64_img_uris(img_urls)
+
         print(f"Generating payload for {object_id}")
         system_instructions = self.__compose_instructions(product_type, fields_to_extract)
         user_prompt = self.__compose_prompt(object_id, product_vendor, variants_data)
-        payload = self.__build_payload(object_id, system_instructions, user_prompt, img_urls, output_schema)        
+        payload = self.__build_payload(object_id, system_instructions, user_prompt, b64_img_uris, output_schema)    # fix img URL handling now with b64 imgs
         self.batch_manager.write(payload)
 
-        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, img_urls, output_schema)
+        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, b64_img_uris, output_schema)
         print(f"Estimated input payload tokens = {tokens}")
+
+    def __get_base64_img_uris(self, img_urls: List[str], timeout=10) -> List[str]:
+        """
+        Fetch each image URL and return a list of their base64 encoded images
+        """
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        b64_img_uris = []
+
+        for img_url in img_urls:
+            try:
+                response = session.get(img_url, timeout=timeout)
+                response.raise_for_status()
+                # Prefer server-declared Content-Type; fall back to URL-based guess; default to JPEG
+                mime = (response.headers.get('Content-Type', '') or '').split(';', 1)[0].lower()
+
+                if not mime.startswith('image/'):
+                    mime = (mimetypes.guess_type(img_url)[0] or 'image/jpeg').lower()
+
+                b64_img = base64.b64encode(response.content).decode('utf-8')
+                b64_img_uris.append(f"data:{mime};base64,{b64_img}")
+            except Exception:
+                print(f"Could not crawl image URL: {img_url}")
+                b64_img_uris.append(None)
+
+        return b64_img_uris
 
     def __compose_instructions(self, product_type: str, fields_to_extract: pd.DataFrame) -> str:
         """
@@ -340,8 +372,8 @@ class PayloadsGenerator:
         for variant_data in variants_data:
             if self.resource_type == 'Product' or (self.resource_type == 'Variant' and variant_data['id'] == object_id):
                 user_prompt += f"## SKU: {variant_data['sku']}\n"
-                if not pd.isna(variant_data['image/url']):
-                    user_prompt += f"- **Specific image URL**: {variant_data['image/url']} \n"
+                if not pd.isna(variant_data['image/url']) and (self.resource_type == 'Variant' and variant_data['id'] == object_id):
+                    user_prompt += "- **Variant-specific Image**: The first image out of all the included input images in the content list is guaranteed to be for this variant.\n"
                 for key, value in variant_data['supplier_data'].items():
                     if key is not self.sku_col_name:
                         cleaned_key = key.replace(":", "")
@@ -354,7 +386,7 @@ class PayloadsGenerator:
 
         return user_prompt
 
-    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, img_urls: List[str], output_schema: Dict) -> Dict:
+    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, b64_img_uris: List[str], output_schema: Dict) -> Dict:
         """
         Construct a single structured API payload for a product or variant.
         """
@@ -362,10 +394,10 @@ class PayloadsGenerator:
         if 'responses' in self.batch_manager.endpoint:
             content = [{'type': 'input_text', 'text': user_prompt}]
 
-            for img_url in img_urls:
+            for b64_img_uri in b64_img_uris:
                 img_url_json_object = {
                     'type': 'input_image',
-                    'image_url': img_url,
+                    'image_url': b64_img_uri,
                     'detail': 'low'
                 }
                 content.append(img_url_json_object)
@@ -395,11 +427,11 @@ class PayloadsGenerator:
         else:
             content = [{'type': 'text', 'text': user_prompt}]
 
-            for img_url in img_urls:
+            for b64_img_uri in b64_img_uris:
                 img_url_json_object = {
                     'type': 'image_url',
                     'image_url': {
-                        'url': img_url,
+                        'url': b64_img_uri,
                         'detail': 'low'
                     },
                 }

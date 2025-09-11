@@ -10,7 +10,15 @@ def main():
     client = utils.init()
     endpoint = utils.set_endpoint()
     model = 'gpt-5'
-    date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Ask user if this run is to fix a previous batch or to start a new run
+    fix_prev_batch = utils.check_starting_point()
+
+    if fix_prev_batch:
+        date_time = utils.get_prev_batch_dir()
+        first_process_order_number = utils.get_first_process_order_number()
+    else:
+        date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     # Pre-process source files and sequence batches by process order
     supplier_data_path, store_data_path, fields_data_path = utils.get_source_paths()
@@ -33,13 +41,14 @@ def main():
         payloads_generator.generate_batch_payloads(process_order_number)
 
         if utils.get_file_size(batch_manager.current_batch_files.batch_payloads_path) > 0:
-            # Create batch payloads JSONL file, upload it, then execute batch payloads asynchronously
-            batch_manager.upload_batch_payloads()
-            batch_manager.create_batch()
+            if not fix_prev_batch or (fix_prev_batch and process_order_number >= first_process_order_number):
+                # Create batch payloads JSONL file, upload it, then execute batch payloads asynchronously
+                batch_manager.upload_batch_payloads()
+                batch_manager.create_batch()
 
-            # Poll status of batch execution, downloading the output JSONL results upon completion
-            batch_manager.poll_batch_until_complete()
-            batch_manager.download_batch_results()
+                # Poll status of batch execution, downloading the output JSONL results upon completion
+                batch_manager.poll_batch_until_complete()
+                batch_manager.download_batch_results()
             batch_manager.update_error_ids()
             batch_manager.save_outputs_from_batch_results()
             batch_manager.print_token_usage()

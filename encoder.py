@@ -11,12 +11,12 @@ class Encoder:
             self.encoder: tiktoken.Encoding = tiktoken.encoding_for_model(model + '-')
         self.batch_tokens_estimate: Dict = defaultdict(int)
 
-    def estimate_input_tokens(self, process_order_number: int, system_instructions: str, user_prompt: str, img_urls: List[str], output_schema: Dict) -> int:
+    def estimate_input_tokens(self, process_order_number: int, system_instructions: str, user_prompt: str, b64_img_uris: List[str], output_schema: Dict) -> int:
         tokens = 0
 
         tokens += len(self.encoder.encode(system_instructions))
         tokens += len(self.encoder.encode(user_prompt))
-        tokens += 70 * len(img_urls)        # 70 tokens limit if image 'detail' is set to 'low' for gpt-5
+        tokens += 70 * len(b64_img_uris)        # 70 tokens limit if image 'detail' is set to 'low' for gpt-5
         tokens += len(self.encoder.encode(str(output_schema)))
 
         self.batch_tokens_estimate[process_order_number] += tokens

@@ -25,8 +25,29 @@ def init() -> OpenAI:
 def set_endpoint() -> str:
     endpoints = ['/v1/responses', '/v1/chat/completions']
     print_options(endpoints)
-    idx = int(input("Which endpoint would you like to use with the Batch API? "))
+    idx = int(input("Which endpoint would you like to use with the Batch API?: "))
     return endpoints[idx]
+
+### Program run config functions
+
+def check_starting_point() -> bool:
+    print_options(['Run a new batch sequence', 'Fix a previous batch'])
+    fix_prev_batch = bool(int(input("Do you want to run a new batch sequence or fix a previous batch?: ")))
+    return fix_prev_batch
+
+def get_prev_batch_dir() -> str:
+    folder_names = sorted([
+        name for name in os.listdir('./output') 
+        if os.path.isdir(os.path.join('./output', name))
+    ])
+    print_options(folder_names)
+    prev_batch_dir_idx = int(input("Which previous batch do you want to fix/continue?: "))
+    prev_batch_dir = folder_names[prev_batch_dir_idx]
+    return prev_batch_dir
+
+def get_first_process_order_number() -> int:
+    first_process_order_number = int(input("What process order number do you want to start calling the API?: "))
+    return first_process_order_number
 
 ### Pre-processing and setup functions
 
@@ -36,7 +57,7 @@ def get_source_paths() -> List[str]:
     """
 
     source_dir = Path("./input")
-    data_files = [file for file in source_dir.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx']
+    data_files = sorted([file for file in source_dir.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx'])
     required_files = {'supplier data': None, 'Shopify data': None, 'fields to extract': None}
 
     if len(data_files) < 3:

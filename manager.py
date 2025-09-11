@@ -135,18 +135,19 @@ class BatchManager:
             raise ValueError("No downloadable output file in batch job. Terminating program.")
 
     def update_error_ids(self):
-        with open(self.current_batch_files.batch_errors_path, 'r', encoding='ascii') as f:
-            for line in f:
-                result = json.loads(line)
+        if os.path.exists(self.current_batch_files.batch_errors_path):
+            with open(self.current_batch_files.batch_errors_path, 'r', encoding='ascii') as f:
+                for line in f:
+                    result = json.loads(line)
 
-                if result['response']['body']['error'] is not None:
-                    id = result['custom_id']
-                    error = result['response']['body']['error']['message']
-                    self.error_ids.add(id)
-                    print(f"Detected error at {id}: {error}")
+                    if result['response']['body']['error'] is not None:
+                        id = result['custom_id']
+                        error = result['response']['body']['error']['message']
+                        self.error_ids.add(id)
+                        print(f"Detected error at {id}: {error}")
 
-                print("Program will proceed while omitting all error IDs from future payloads and outputs:")
-                print(self.error_ids)
+            print("Program will proceed while omitting all error IDs from future payloads and outputs:")
+            print(self.error_ids)
 
     def save_outputs_from_batch_results(self):
         """

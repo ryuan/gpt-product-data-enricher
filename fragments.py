@@ -60,9 +60,9 @@ package_measurement_schema = {
     }
 }
 object_schema_reference = {
-    'dimensions_sets': [dimensions_sets_schema, dimensions_schema],
-    'dimensions': [dimensions_schema],
+    'dimensions_sets': [dimensions_sets_schema, dimensions_schema, dimension_schema],
+    'dimensions': [dimensions_schema, dimension_schema],
     'dimension': [dimension_schema],
     'weight': [weight_schema],
-    'package_measurement': [package_measurement_schema, dimensions_schema, weight_schema]
+    'package_measurement': [package_measurement_schema, dimensions_schema, dimension_schema, weight_schema]
 }
