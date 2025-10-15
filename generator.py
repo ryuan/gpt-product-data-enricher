@@ -1,11 +1,13 @@
 import json
+import os
+import io
 import base64
 import mimetypes
 import requests
 import utils
 import pandas as pd
 from typing import List, Dict
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from fragments import object_schema_reference
 from encoder import Encoder
 from manager import BatchManager
@@ -26,6 +28,7 @@ class PayloadsGenerator:
         self.fields_data_df: pd.DataFrame = fields_data_df
         # References
         self.dependency_results: Dict = {}
+        self.img_file_ids: Dict = {}
         # Per-process Variables
         self.process_order_number: int = None
         self.resource_type: str = None
@@ -82,6 +85,8 @@ class PayloadsGenerator:
                             variant_id = variant_data['id']
                             self.__generate_single_payload(variant_id, product_data, variants_data, fields_to_extract, output_schema)
 
+        self.batch_manager.close_batch_payloads_file()
+
         print(f"Estimated input tokens for batch {self.process_order_number} = {self.encoder.batch_tokens_estimate[self.process_order_number]}")
 
     def set_dependency_results(self):
@@ -119,7 +124,7 @@ class PayloadsGenerator:
             dependency_fields = fields_to_extract['Dependency'].dropna().unique()
 
             for dependency_field in dependency_fields:
-                if dependency_field in self.dependency_results[product_id].keys():  # This ensures fields like Frame Color with dependency Framed is kept for furniture
+                if dependency_field in self.dependency_results.get(product_id, {}):  # This ensures fields like Frame Color with dependency Framed is kept for furniture
                     if self.dependency_results[product_id][dependency_field] is not True:
                         fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
 
@@ -167,7 +172,7 @@ class PayloadsGenerator:
                 field_value_structure['type'] = [field_type, 'null']
             elif field_type == 'enum':
                 field_value_structure['type'] = ['string', 'null']
-                field_value_structure['enum'] = json.loads(field_enum_values) + [None]
+                field_value_structure['enum'] = json.loads(field_enum_values) + ['null']
             elif field_type == 'object':
                 field_value_structure = { "$ref": f"#/$defs/{field_object_type}" }
             elif field_type == 'array':
@@ -176,7 +181,7 @@ class PayloadsGenerator:
                 if field_array_items in ['string', 'number', 'boolean']:
                     field_value_structure['items'] = {'type': field_array_items}
                 elif field_array_items == 'enum':
-                    field_value_structure['items'] = {'enum': json.loads(field_enum_values) + [None]}
+                    field_value_structure['items'] = {'enum': json.loads(field_enum_values) + ['null']}
                 elif field_array_items == 'object':
                     field_value_structure['items'] = { "$ref": f"#/$defs/{field_object_type}" }
 
@@ -184,9 +189,9 @@ class PayloadsGenerator:
                 'type': 'object',
                 'properties': {
                     'reasoning': {'type': 'string'},
-                    'confidence': {'type': ['string', 'null'], 'enum': ['low', 'medium', 'high', None]},
+                    'confidence': {'type': ['string', 'null'], 'enum': ['low', 'medium', 'high']},
                     'warning': {'type': ['string', 'null']},
-                    'source': {'type': ['string', 'null'], 'enum': ['supplier data', 'image', 'both', 'inferred', None]},
+                    'source': {'type': ['string', 'null'], 'enum': ['supplier data', 'image', 'both', 'inferred']},
                     'value': field_value_structure,
                 },
                 'required': ['reasoning', 'confidence', 'warning', 'source', 'value'],
@@ -224,22 +229,60 @@ class PayloadsGenerator:
                     img_urls.pop(img_urls.index(variant_img_url))
                     img_urls.insert(0, variant_img_url)
 
-        # Convert image URLs to URIs with base64 encoded image and MIME type (this helps avoids URL inaccessible errors)
-        b64_img_uris = self.__get_base64_img_uris(img_urls)
+        # If using Responses API, upload images via Files API and get image file IDs
+        # If using Chat Completions API, convert image URLs to base64 encoded images (max 300 images to keep batch payloads under 200 MB limit)
+        if 'responses' in self.batch_manager.endpoint:
+            img_urls = self.__get_img_file_ids(img_urls)
+        elif 'completions' in self.batch_manager.endpoint and len(self.store_data_df['image/url'].notna()) < 300:
+            img_urls = self.__get_base64_img_uris(img_urls)
 
         print(f"Generating payload for {object_id}")
         system_instructions = self.__compose_instructions(product_type, fields_to_extract)
         user_prompt = self.__compose_prompt(object_id, product_vendor, variants_data)
-        payload = self.__build_payload(object_id, system_instructions, user_prompt, b64_img_uris, output_schema)    # fix img URL handling now with b64 imgs
+        payload = self.__build_payload(object_id, system_instructions, user_prompt, img_urls, output_schema)    # fix img URL handling now with b64 imgs
         self.batch_manager.write(payload)
 
-        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, b64_img_uris, output_schema)
+        tokens = self.encoder.estimate_input_tokens(self.process_order_number, system_instructions, user_prompt, img_urls, output_schema)
         print(f"Estimated input payload tokens = {tokens}")
+
+    def __get_img_file_ids(self, img_urls: List[str], timeout=10) -> List[str]:
+        """
+        Upload images with Files API and get the file IDs
+        """
+
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        file_ids = []
+
+        for img_url in img_urls:
+            try:
+                if img_url not in self.img_file_ids:
+                    response = session.get(img_url, timeout=timeout)
+                    response.raise_for_status()
+                    image_file = io.BytesIO(response.content)
+                    parsed_url = urlparse(img_url)
+                    image_file.name = os.path.basename(parsed_url.path)
+                    result = self.batch_manager.client.files.create(
+                        file=image_file,
+                        purpose='vision',
+                        expires_after={
+                            'anchor': 'created_at',
+                            'seconds': 86400
+                        }
+                    )
+                    self.img_file_ids[img_url] = result.id
+
+                file_ids.append(self.img_file_ids[img_url])
+            except Exception:
+                print(f"Could not crawl image URL: {img_url}")
+
+        return file_ids
 
     def __get_base64_img_uris(self, img_urls: List[str], timeout=10) -> List[str]:
         """
         Fetch each image URL and return a list of their base64 encoded images
         """
+
         session = requests.Session()
         session.headers.update({'User-Agent': 'Mozilla/5.0'})
         b64_img_uris = []
@@ -279,7 +322,7 @@ class PayloadsGenerator:
             "- Only return null for Required fields if no trustworthy data exists; in such cases, provide a warning message.\n"
             "- Optional fields may be left null if data is untrustworthy or you lack confidence in your extracted value, with a brief explanation when feasible.\n"
             "- All field outputs must exactly match the requested structured output schema in naming, structure, data type, and order.\n"
-            "- Always use American English spelling and writing style.\n"
+            "- Always use the most popular American English spelling and grammar, with non-sentence string values in title case.\n"
             "- For outputs in string format, always use ASCII characters only.\n"
         )
 
@@ -386,7 +429,7 @@ class PayloadsGenerator:
 
         return user_prompt
 
-    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, b64_img_uris: List[str], output_schema: Dict) -> Dict:
+    def __build_payload(self, object_id: str, system_instructions: str, user_prompt: str, img_objs: List[str], output_schema: Dict) -> Dict:
         """
         Construct a single structured API payload for a product or variant.
         """
@@ -394,10 +437,10 @@ class PayloadsGenerator:
         if 'responses' in self.batch_manager.endpoint:
             content = [{'type': 'input_text', 'text': user_prompt}]
 
-            for b64_img_uri in b64_img_uris:
+            for img_obj in img_objs:
                 img_url_json_object = {
                     'type': 'input_image',
-                    'image_url': b64_img_uri,
+                    'file_id': img_obj,
                     'detail': 'low'
                 }
                 content.append(img_url_json_object)
@@ -427,11 +470,11 @@ class PayloadsGenerator:
         else:
             content = [{'type': 'text', 'text': user_prompt}]
 
-            for b64_img_uri in b64_img_uris:
+            for img_obj in img_objs:
                 img_url_json_object = {
                     'type': 'image_url',
                     'image_url': {
-                        'url': b64_img_uri,
+                        'url': img_obj,
                         'detail': 'low'
                     },
                 }

@@ -147,7 +147,7 @@ def validate_fields_data_df(fields_data_path: Path, fields_data_df: pd.DataFrame
     
     if invalid_process_order_numbers:
         raise ValueError(
-            f"These process order numbers are batching fields that belong to products and variants: {invalid_process_order_numbers}"
+            f"These process order numbers are batching fields that belong to products and variants: {invalid_process_order_numbers}\n"
             "Each batch process must contain fields that belong to either Product or Variant. Correct and rerun program."
         )
 

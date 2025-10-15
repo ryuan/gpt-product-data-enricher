@@ -3,6 +3,7 @@ import os
 import json
 import time
 import datetime
+import utils
 import pandas as pd
 from typing import List, Dict
 from collections import defaultdict
@@ -46,18 +47,20 @@ class BatchManager:
 
         self.error_ids: set = set()
 
-    def create_batch_files(self, process_order_number: int) -> None:
+    def create_batch_files(self, process_order_number: int):
         self.current_batch_files = BatchFiles(self.date_time, process_order_number)
         self.all_batch_files.append(self.current_batch_files)
 
     def write(self, payload: Dict):
         self.current_batch_files.batch_payloads_file.write((json.dumps(payload, ensure_ascii=True) + '\n'))
 
+    def close_batch_payloads_file(self):
+        self.current_batch_files.batch_payloads_file.close()
+
     def upload_batch_payloads(self):
         """
         Upload batch payloads JSONL file to OpenAI servers, returning the file upload confirmation object
         """
-        self.current_batch_files.batch_payloads_file.close()
         self.current_batch_files.upload_response = self.client.files.create(
             file=open(self.current_batch_files.batch_payloads_path, 'rb'),
             purpose='batch'
@@ -164,7 +167,7 @@ class BatchManager:
                             outputs: List[Dict] = body.get('output', body.get('choices'))
 
                             for output in outputs:
-                                content = output.get('content') or output.get('message').get('content')
+                                content = output.get('content') or output.get('message', {}).get('content')
 
                                 if content:
                                     if isinstance(content, list):
@@ -240,22 +243,23 @@ class BatchManager:
         extracted_data_ref = defaultdict(dict)
 
         for batch_files in self.all_batch_files:
-            with open(batch_files.batch_outputs_path, 'r', encoding='ascii') as outputs_f:
-                for line in outputs_f:
-                    if line.strip():  # Skip empty lines
-                        try:
-                            output = json.loads(line)
-                            object_id: str = output['id']
-                            structured_output: Dict[str, Dict] = output['output']
+            if utils.get_file_size(batch_files.batch_outputs_path) > 0 and utils.get_file_size(batch_files.batch_payloads_path) > 0:
+                with open(batch_files.batch_outputs_path, 'r', encoding='ascii') as outputs_f:
+                    for line in outputs_f:
+                        if line.strip():  # Skip empty lines
+                            try:
+                                output = json.loads(line)
+                                object_id: str = output['id']
+                                structured_output: Dict[str, Dict] = output['output']
 
-                            if object_id not in self.error_ids:
-                                for field_name, output in structured_output.items():
-                                    if isinstance(output['value'], str):
-                                        value = output['value']
-                                    else:
-                                        value = json.dumps(output['value'])
-                                    extracted_data_ref[object_id][field_name] = value
-                        except json.JSONDecodeError as e:
-                            print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
+                                if object_id not in self.error_ids:
+                                    for field_name, output in structured_output.items():
+                                        if isinstance(output['value'], str):
+                                            value = output['value']
+                                        else:
+                                            value = json.dumps(output['value'])
+                                        extracted_data_ref[object_id][field_name] = value
+                            except json.JSONDecodeError as e:
+                                print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
 
         return extracted_data_ref
