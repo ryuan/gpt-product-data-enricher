@@ -95,7 +95,7 @@ class PayloadsGenerator:
         """
 
         self.dependency_results = {}
-        dependency_fields = self.fields_data_df['Dependency'].dropna().unique()
+        dependency_fields: List[str] = self.fields_data_df['Dependency'].dropna().unique()
 
         with open(self.batch_manager.current_batch_files.batch_outputs_path, 'r', encoding='ascii') as f:
             for line in f:
@@ -107,9 +107,14 @@ class PayloadsGenerator:
                         outputs: Dict = output['output']
                         
                         for dependency_field in dependency_fields:
-                            if dependency_field in outputs.keys():
+                            if '&&' in dependency_field:
+                                conj_dependency_fields = [field.strip() for field in dependency_field.split('&&')]
+                                
+                                for conj_dependency_field in conj_dependency_fields:
+                                    if conj_dependency_field in outputs.keys():
+                                        self.dependency_results[product_id][conj_dependency_field] = outputs[conj_dependency_field]['value']
+                            elif dependency_field in outputs.keys():
                                 self.dependency_results[product_id][dependency_field] = outputs[dependency_field]['value']
-
                     except json.JSONDecodeError as e:
                         print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
 
@@ -121,10 +126,22 @@ class PayloadsGenerator:
         fields_to_extract = self.fields_data_df[self.fields_data_df['Process Order Number'] == self.process_order_number].dropna(subset=[product_data['productType']])
 
         if self.dependency_results:
-            dependency_fields = fields_to_extract['Dependency'].dropna().unique()
+            dependency_fields: List[str] = fields_to_extract['Dependency'].dropna().unique()
 
             for dependency_field in dependency_fields:
-                if dependency_field in self.dependency_results.get(product_id, {}):  # This ensures fields like Frame Color with dependency Framed is kept for furniture
+                if '&&' in dependency_field:
+                    conj_dependency_fields = [field.strip() for field in dependency_field.split('&&')]
+                    dependency_result = True
+                    
+                    for conj_dependency_field in conj_dependency_fields:
+                        if conj_dependency_field in self.dependency_results.get(product_id, {}):    # Falsability check for sometimes unused dependencies like Framed
+                            if self.dependency_results[product_id][conj_dependency_field] is not True:
+                                dependency_result = False
+                                break
+
+                    if dependency_result == False:
+                        fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
+                elif dependency_field in self.dependency_results.get(product_id, {}):   # Falsability check for sometimes unused dependencies like Framed
                     if self.dependency_results[product_id][dependency_field] is not True:
                         fields_to_extract = fields_to_extract[fields_to_extract['Dependency'] != dependency_field]
 
@@ -322,7 +339,8 @@ class PayloadsGenerator:
             "- Only return null for Required fields if no trustworthy data exists; in such cases, provide a warning message.\n"
             "- Optional fields may be left null if data is untrustworthy or you lack confidence in your extracted value, with a brief explanation when feasible.\n"
             "- All field outputs must exactly match the requested structured output schema in naming, structure, data type, and order.\n"
-            "- Always use the most popular American English spelling and grammar, with non-sentence string values in title case.\n"
+            "- Always use the more popular American English grammar and spelling (e.g., 'gray' should be preferred over 'grey').\n"
+            "- Format longer, descriptive text values in APA-style sentence case, and shorter categorical or label-like values in APA-style title case.\n"
             "- For outputs in string format, always use ASCII characters only.\n"
         )
 

@@ -1,18 +1,24 @@
 from openai import OpenAI
 import os
+import io
 import json
 import time
 import datetime
 import utils
 import pandas as pd
-from typing import List, Dict
+from typing import List, Dict, BinaryIO
 from collections import defaultdict
+from unidecode import unidecode
 
 
 class BatchFiles:
     def __init__(self, date_time: str, process_order_number: int):
         self.process_order_number = process_order_number
+        
+        # Previous batch process error fix variables
+        self.prev_batch_process_error_ids: List[str] = []
 
+        # General filepaths
         self.batch_payloads_path = f'payloads/{date_time}/batch_payloads_{process_order_number}.jsonl'
         self.batch_results_path = f'output/{date_time}/batch_results_{process_order_number}.jsonl'
         self.batch_outputs_path = f'output/{date_time}/batch_outputs_{process_order_number}.jsonl'
@@ -36,15 +42,15 @@ class BatchFiles:
         self.total_tokens = 0
 
 class BatchManager:
-    def __init__(self, client: OpenAI, endpoint: str, model: str, date_time: str):
+    def __init__(self, client: OpenAI, endpoint: str, model: str, date_time: str, fix_prev_batch: bool):
         self.client: OpenAI = client
         self.endpoint: str = endpoint
         self.model: str = model
         self.date_time: str = date_time
+        self.fix_prev_batch: bool = fix_prev_batch        
 
         self.all_batch_files: List[BatchFiles] = []
         self.current_batch_files: BatchFiles = None
-
         self.error_ids: set = set()
 
     def create_batch_files(self, process_order_number: int):
@@ -57,12 +63,55 @@ class BatchManager:
     def close_batch_payloads_file(self):
         self.current_batch_files.batch_payloads_file.close()
 
+    def update_prev_batch_process_errors(self):
+        """
+        Reads payloads JSONL file and updates list of which object IDs are missing from results JSONL file.
+        """
+        with open(self.current_batch_files.batch_payloads_path, 'r', encoding='ascii') as payloads_f:
+            result_ids = set()
+
+            if os.path.exists(self.current_batch_files.batch_results_path):
+                with open(self.current_batch_files.batch_results_path, 'r', encoding='ascii') as results_f:
+                    for result_line in results_f:
+                        result = json.loads(result_line)
+                        object_id = result['custom_id']
+                        result_ids.add(object_id)
+                    
+            for payload_line in payloads_f:
+                payload = json.loads(payload_line)
+                object_id = payload['custom_id']
+                
+                if object_id not in result_ids:
+                    self.current_batch_files.prev_batch_process_error_ids.append(object_id)
+
+        if not os.path.exists(self.current_batch_files.batch_results_path):
+            print("Previous batch process results file does not exist. Program will call API with full payload.")
+        elif len(self.current_batch_files.prev_batch_process_error_ids) > 0:
+            print(f"Missing object IDs detected for previous batch process {self.current_batch_files.process_order_number}:")
+            print(self.current_batch_files.prev_batch_process_error_ids)
+        else:
+            print("No missing object IDs detected in previous batch process results compared to payloads.")
+
+    def prev_batch_process_has_errors(self) -> bool:
+        prev_batch_process_has_errors = False
+
+        if len(self.current_batch_files.prev_batch_process_error_ids) > 0:
+            prev_batch_process_has_errors = True
+            
+        return prev_batch_process_has_errors
+
     def upload_batch_payloads(self):
         """
         Upload batch payloads JSONL file to OpenAI servers, returning the file upload confirmation object
         """
+        if not os.path.exists(self.current_batch_files.batch_results_path):
+            batch_payloads = open(self.current_batch_files.batch_payloads_path, 'rb')
+        else:
+            batch_payloads = self.__get_error_filtered_payloads_file()
+            print("Program will modify payloads file with just the missing object IDs then upload it.")
+
         self.current_batch_files.upload_response = self.client.files.create(
-            file=open(self.current_batch_files.batch_payloads_path, 'rb'),
+            file=batch_payloads,
             purpose='batch'
         )
 
@@ -118,36 +167,53 @@ class BatchManager:
         """
         Download the failed and completed results of the batch job.
         """
-        # Download the failed results if the batch has an error file
+        # Download the failed results if the batch has an error file, otherwise delete any existing error file if fixing previous batch
         if self.current_batch_files.batch.error_file_id:
             self.current_batch_files.error_results = self.client.files.content(self.current_batch_files.batch.error_file_id)
 
             with open(self.current_batch_files.batch_errors_path, 'w', encoding='ascii') as f:
                 f.write(self.current_batch_files.error_results.text)
                 print(f"Failed results saved to: {self.current_batch_files.batch_errors_path}")
+        elif self.fix_prev_batch and os.path.exists(self.current_batch_files.batch_errors_path):
+            os.remove(self.current_batch_files.batch_errors_path)
+            print(f"Batch process fix ended with no error file. Deleting previous error file at: {self.current_batch_files.batch_errors_path}")
 
-        # Download the completed requests
+        # Download the completed requests if no preexisting results file, otherwise append results content to file if fixing previous batch
         if self.current_batch_files.batch.output_file_id:
-            print(f"Downloading completed results to {self.current_batch_files.batch_results_path}")
             self.current_batch_files.results = self.client.files.content(self.current_batch_files.batch.output_file_id)
 
-            with open(self.current_batch_files.batch_results_path, 'w', encoding='ascii') as f:
+            if not self.fix_prev_batch or (self.fix_prev_batch and not os.path.exists(self.current_batch_files.batch_results_path)):
+                print(f"Downloading completed results to: {self.current_batch_files.batch_results_path}")
+                mode = 'w'
+            else:
+                print(f"Appending completed results to prexisting results file at: {self.current_batch_files.batch_results_path}")
+                mode = 'a'
+
+            with open(self.current_batch_files.batch_results_path, mode, encoding='ascii') as f:
                 f.write(self.current_batch_files.results.text)
                 print(f"Completed results saved to: {self.current_batch_files.batch_results_path}")
         else:
             raise ValueError("No downloadable output file in batch job. Terminating program.")
 
     def update_error_ids(self):
+        """
+        Reads the batch error JSONL file and adds object IDs to list of IDs to skip in future batch processes.
+        """
         if os.path.exists(self.current_batch_files.batch_errors_path):
             with open(self.current_batch_files.batch_errors_path, 'r', encoding='ascii') as f:
                 for line in f:
                     result = json.loads(line)
 
-                    if result['response']['body']['error'] is not None:
+                    if result['response']['status_code'] is not None:
                         id = result['custom_id']
-                        error = result['response']['body']['error']['message']
+                        status_code = result['response']['status_code']
+                        error_message = result['response']['body'].get('error', {}).get('message', {})
                         self.error_ids.add(id)
-                        print(f"Detected error at {id}: {error}")
+
+                        if error_message:
+                            print(f"[{status_code}] Detected error at {id}: {error_message}")
+                        else:
+                            print(f"[{status_code}] Detected error at {id} with no error message")
 
             print("Program will proceed while omitting all error IDs from future payloads and outputs:")
             print(self.error_ids)
@@ -195,6 +261,26 @@ class BatchManager:
         print(usage_summary)
         print("\n")
 
+    def __get_error_filtered_payloads_file(self) -> BinaryIO:
+        """
+        Opens the payloads JSONL file, filters away any non-error object IDS, then returns the binary file.
+        """
+        filtered_payload_lines = []
+
+        with open(self.current_batch_files.batch_payloads_path, 'r') as f:
+            for line in f:
+                payload = json.loads(line)
+
+                if payload['custom_id'] in self.current_batch_files.prev_batch_process_error_ids:
+                    filtered_payload_lines.append(json.dumps(payload, ensure_ascii=True) + '\n')
+
+        # Join and wrap in a BytesIO object so it behaves like a binary file
+        filtered_payloads_content = "".join(filtered_payload_lines).encode('ascii')
+        filtered_payloads_file = io.BytesIO(filtered_payloads_content)
+        filtered_payloads_file.name = f'batch_payloads_{self.current_batch_files.process_order_number}_error_fix.jsonl'
+
+        return filtered_payloads_file
+
     def __update_token_usage(self, result: Dict):
         usage: Dict = result['response']['body']['usage']
 
@@ -223,6 +309,9 @@ class BatchManager:
         # Sort IDs (rows) and fields (columns) based on order from store_data_df and fields_data_df, then rename fields to Graphql fields
         out_df = out_df.reindex(index=all_object_ids[all_object_ids.isin(out_df.index)], columns=field_names)
         out_df = out_df.rename(columns=names_to_gql_ref)
+
+        # Pre-process the combined df to convert/remove non-ASCII characters
+        out_df = out_df.apply(lambda col: col.map(lambda x: unidecode(x) if isinstance(x, str) else x))
 
         # Create the XLSX file from the combined df
         combined_outputs_path = f'output/{self.date_time}/batch_outputs_combined_{self.date_time}.xlsx'

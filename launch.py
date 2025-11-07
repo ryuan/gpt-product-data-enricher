@@ -16,7 +16,6 @@ def main():
 
     if fix_prev_batch:
         date_time = utils.get_prev_batch_dir()
-        first_process_order_number = utils.get_first_process_order_number()
     else:
         date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -32,7 +31,7 @@ def main():
 
     # Initiate PayloadsGenerator and BatchManager object
     encoder = Encoder(model)
-    batch_manager = BatchManager(client, endpoint, model, date_time)
+    batch_manager = BatchManager(client, endpoint, model, date_time, fix_prev_batch)
     payloads_generator = PayloadsGenerator(crawler, encoder, batch_manager, supplier_data_df, store_data_df, fields_data_df)
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
@@ -41,7 +40,10 @@ def main():
         payloads_generator.generate_batch_payloads(process_order_number)
 
         if utils.get_file_size(batch_manager.current_batch_files.batch_payloads_path) > 0:
-            if not fix_prev_batch or (fix_prev_batch and process_order_number >= first_process_order_number):
+            if fix_prev_batch:
+                batch_manager.update_prev_batch_process_errors()
+
+            if not fix_prev_batch or (fix_prev_batch and batch_manager.prev_batch_process_has_errors()):
                 # Create batch payloads JSONL file, upload it, then execute batch payloads asynchronously
                 batch_manager.upload_batch_payloads()
                 batch_manager.create_batch()
@@ -49,6 +51,7 @@ def main():
                 # Poll status of batch execution, downloading the output JSONL results upon completion
                 batch_manager.poll_batch_until_complete()
                 batch_manager.download_batch_results()
+
             batch_manager.update_error_ids()
             batch_manager.save_outputs_from_batch_results()
             batch_manager.print_token_usage()

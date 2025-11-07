@@ -45,10 +45,6 @@ def get_prev_batch_dir() -> str:
     prev_batch_dir = folder_names[prev_batch_dir_idx]
     return prev_batch_dir
 
-def get_first_process_order_number() -> int:
-    first_process_order_number = int(input("What process order number do you want to start calling the API?: "))
-    return first_process_order_number
-
 ### Pre-processing and setup functions
 
 def get_source_paths() -> List[str]:
