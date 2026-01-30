@@ -20,8 +20,8 @@ Featuring context-based, sequential batch processing, the program aims to transf
 - Batch sequencing supports dependency checks for subsequent fields (e.g., only if first call labeled `Upholstered` as `true`, request `Upholstery Color` in a later call)
 - Ability to provide instructive notes for each extraction field to enforce specific labeling guidelines
 - Custom inclusion/exclusion tag in instructive notes based on product type or field presence (e.g., show a particular block of notes only if the product type is `Floor Lamps` or `Table Lamps`)
-- Text prompt and image inputs are automatically grouped together with their parent objects to improve model accuracy
-- Support for processing product-level resource objects as a group of products sharing the same first word in their title (i.e., this can let the model extract data that requires context across multiple different but similar products such as defining combined listings or standardizing titles across products from the same collection and type)
+- Text prompt and image inputs are sorted and grouped with their parent objects to improve model understanding
+- Support for processing product-level resource objects in groups sharing the same title first word (i.e., this can let the model extract data that requires context across multiple different but similar products such as defining combined listings or standardizing titles across products from the same collection and type)
 - Decouples GraphQL field names from descriptive field names during data extraction for superior model output
 - Results from all batch processes are unified and exported into a single XLSX file with GraphQL fields as headers for easy importing via GraphQL mutations
 - ...too lazy to write more (just ask if you're wondering about a feature's existance)
