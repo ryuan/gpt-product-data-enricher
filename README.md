@@ -2,7 +2,7 @@
 
 **Enrich, enhance, and normalize ecommerce product data using GPT-5/GPT-5.1**
 
-The purpose of this program is to enrich and normalize ecommerce data for products, variants, and images. Use it to empower more intuitive sidebar filter labels, unique product descriptions, granular specifications data, classify images for showing on specific sections, label image alt text for shot type and SKU, and more.
+The purpose of this program is to enrich and normalize ecommerce data for products, variants, and images. Use it to create more intuitive sidebar filter labels, unique product descriptions, granular specifications data, classify images for showing on specific sections, label image alt text for shot type and SKU, and more.
 
 The program ingests data from 3 sources - tabular CSV data from a supplier, product images, and Shopify GraphQL `products` query. It then processes all the data, mapping them to standardized fields, while adding, omitting, and modifying (both rewriting and normalizing) data for accuracy, originality, and filterability.
 
@@ -20,7 +20,7 @@ Featuring context-based, sequential batch processing, the program aims to transf
 - Batch sequencing supports dependency checks for subsequent fields (e.g., only if first call labeled `Upholstered` as `true`, request `Upholstery Color` in a later call)
 - Ability to provide instructive notes for each extraction field to enforce specific labeling guidelines
 - Custom inclusion/exclusion tag in instructive notes based on product type or field presence (e.g., show a particular block of notes only if the product type is `Floor Lamps` or `Table Lamps`)
-- Text prompt and image inputs are sorted and grouped with their parent objects to improve model understanding
+- Prompts and image inputs are chunked and grouped with their parent objects to improve model understanding
 - Support for processing product-level resource objects in groups sharing the same title first word (i.e., this can let the model extract data that requires context across multiple different but similar products such as defining combined listings or standardizing titles across products from the same collection and type)
 - Decouples GraphQL field names from descriptive field names during data extraction for superior model output
 - Results from all batch processes are unified and exported into a single XLSX file with GraphQL fields as headers for easy importing via GraphQL mutations
