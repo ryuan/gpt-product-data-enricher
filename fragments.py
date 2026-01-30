@@ -1,3 +1,37 @@
+product_schema = {
+    # Schema to define a product, with fields structured as input for GraphQL's productSet mutation
+    'product': {
+        'type': 'object',
+        'properties': {
+            'productType': {'enum': ['FILL']},
+            'status': {'type': 'string', 'const': 'DRAFT'},
+            'vendor': {'enum': ['Safavieh', 'SEI', 'Modway', 'TOV', 'Surya', 'HomArt', 'Adesso', 'Moe\'s']},
+            'variants': {'type': 'array', 'items': { '$ref': '#/$defs/variant'}, 'minItems': 1 }
+        }
+    }
+}
+variant_schema = {
+    # Complements product_schema to create variants as part of its input for GraphQL's productSet mutation
+    'variant': {
+        'type': 'object',
+        'properties': {
+            'sku': {'type': 'string'},
+            'barcode': {'type': ['string', 'null']},
+            'inventoryItem': {
+                'type': 'object',
+                'properties': {
+                    'measurement': {
+                        'type': ['object', 'null'], 
+                        'properties': { '$ref': '#/$defs/weight'},
+                        'required': ['weight'],
+                        'additionalProperties': False
+                    },
+                    'tracked': {'type': 'boolean', "const": True}
+                }
+            }
+        }
+    }
+}
 dimension_schema = {
     # Conforms to GraphQL format for 'Dimension' data type
     'dimension': {
@@ -60,6 +94,8 @@ package_measurement_schema = {
     }
 }
 object_schema_reference = {
+    'product': [product_schema, variant_schema, weight_schema],
+    'variant': [variant_schema, weight_schema],
     'dimensions_sets': [dimensions_sets_schema, dimensions_schema, dimension_schema],
     'dimensions': [dimensions_schema, dimension_schema],
     'dimension': [dimension_schema],

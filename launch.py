@@ -1,38 +1,33 @@
 import utils
 from datetime import datetime
-from generator import PayloadsGenerator
+from generator import DataExtractor, DataExtractor
 from encoder import Encoder
 from manager import BatchManager
-from crawler import WebSearchTool
 
 
 def main():
     client = utils.init()
+    model = utils.set_model()
     endpoint = utils.set_endpoint()
-    model = 'gpt-5'
 
     # Ask user if this run is to fix a previous batch or to start a new run
-    fix_prev_batch = utils.check_starting_point()
+    is_fix_prev_batch = utils.confirm_starting_point()
 
-    if fix_prev_batch:
+    if is_fix_prev_batch:
         date_time = utils.get_prev_batch_dir()
     else:
         date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     # Pre-process source files and sequence batches by process order
     supplier_data_path, store_data_path, fields_data_path = utils.get_source_paths()
+    new_skus = utils.get_new_skus_list()
     supplier_data_df, store_data_df, fields_data_df = utils.get_input_dfs(supplier_data_path, store_data_path, fields_data_path)
     process_order_numbers = utils.sequence_batches(fields_data_df)
 
-    # Prompt user to run web search tool (or reuse existing web search results)
-    web_search_results_path = 'web-search/web_search_results.jsonl'
-    crawler = WebSearchTool(client, endpoint, model, store_data_df, web_search_results_path)
-    crawler.run()
-
     # Initiate PayloadsGenerator and BatchManager object
     encoder = Encoder(model)
-    batch_manager = BatchManager(client, endpoint, model, date_time, fix_prev_batch)
-    payloads_generator = PayloadsGenerator(crawler, encoder, batch_manager, supplier_data_df, store_data_df, fields_data_df)
+    batch_manager = BatchManager(client, endpoint, model, date_time, is_fix_prev_batch)
+    payloads_generator = DataExtractor(encoder, batch_manager, supplier_data_df, store_data_df, fields_data_df, new_skus)
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
     for process_order_number in process_order_numbers:
@@ -40,10 +35,10 @@ def main():
         payloads_generator.generate_batch_payloads(process_order_number)
 
         if utils.get_file_size(batch_manager.current_batch_files.batch_payloads_path) > 0:
-            if fix_prev_batch:
+            if is_fix_prev_batch:
                 batch_manager.update_prev_batch_process_errors()
 
-            if not fix_prev_batch or (fix_prev_batch and batch_manager.prev_batch_process_has_errors()):
+            if not is_fix_prev_batch or (is_fix_prev_batch and batch_manager.prev_batch_process_has_errors()):
                 # Create batch payloads JSONL file, upload it, then execute batch payloads asynchronously
                 batch_manager.upload_batch_payloads()
                 batch_manager.create_batch()

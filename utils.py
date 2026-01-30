@@ -7,6 +7,8 @@ from typing import List, Tuple
 from tag_parsor import parse_custom_tags
 
 
+INPUT_DIR = Path("./input")
+
 def init() -> OpenAI:
     load_dotenv()
     client = OpenAI()
@@ -22,6 +24,12 @@ def init() -> OpenAI:
 
     return client
 
+def set_model() -> str:
+    models = ['gpt-5', 'gpt-5.1']
+    print_options(models)
+    idx = int(input("Which model would you like to use with the Batch API?: "))
+    return models[idx]
+
 def set_endpoint() -> str:
     endpoints = ['/v1/responses', '/v1/chat/completions']
     print_options(endpoints)
@@ -30,10 +38,10 @@ def set_endpoint() -> str:
 
 ### Program run config functions
 
-def check_starting_point() -> bool:
+def confirm_starting_point() -> bool:
     print_options(['Run a new batch sequence', 'Fix a previous batch'])
-    fix_prev_batch = bool(int(input("Do you want to run a new batch sequence or fix a previous batch?: ")))
-    return fix_prev_batch
+    is_fix_prev_batch = bool(int(input("Do you want to run a new batch sequence or fix a previous batch?: ")))
+    return is_fix_prev_batch
 
 def get_prev_batch_dir() -> str:
     folder_names = sorted([
@@ -52,16 +60,13 @@ def get_source_paths() -> List[str]:
     Get filepaths for all the required CSV/XLSX sources for data pre-processing and ingestion.
     """
 
-    source_dir = Path("./input")
-    data_files = sorted([file for file in source_dir.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx'])
+    data_files = sorted([file for file in INPUT_DIR.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx'])
     required_files = {'supplier data': None, 'Shopify data': None, 'fields to extract': None}
 
-    if len(data_files) < 3:
+    if len(data_files) < len(required_files):
         raise ValueError(
-            "There needs to be 3 files in the ./source directory."
-            "1. CSV/XLSX product data from a supplier."
-            "2. CSV/XLSX Shopify data including image URLs."
-            "3. CSV/XLSX with list of fields to extract."
+            f"There needs to be {len(required_files)} files in the ./input directory."
+            f"Required CSV or XLSX files include: {list(required_files.keys())}"
             "Refer to the README.md for detailed formatting required for each file."
         )
     else:
@@ -85,6 +90,36 @@ def get_input_dfs(supplier_data_path: Path, store_data_path: Path, fields_data_p
     validate_fields_data_df(fields_data_path, fields_data_df)
 
     return supplier_data_df, store_data_df, fields_data_df
+
+def get_new_skus_list() -> List:
+    """
+    Check if user wants to provide a list of newly added SKUs so that the program processes only products relevant to them
+    """
+    
+    new_skus = []
+
+    print_options(["No", "Yes"])
+    has_new_skus = bool(int(input("Do you want to provide a CSV/XLSX file with list of newly added SKUs to focus on when processing?: ")))
+
+    if has_new_skus:
+        data_files = sorted([file for file in INPUT_DIR.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx'])
+        print_options(data_files)
+        file_idx = int(input(f"Which CSV/XLSX file has the list of new SKUs?: "))
+        new_skus_data_path = data_files[file_idx]
+        new_skus_data_df = clean_df(pd.read_csv(new_skus_data_path) if new_skus_data_path.suffix == '.csv' else pd.read_excel(new_skus_data_path))
+
+        if new_skus_data_df.columns.size == 1:
+            new_skus = new_skus_data_df.iloc[:, 0].to_list()
+        elif new_skus_data_df.columns.size > 1:
+            headers = list(new_skus_data_df)
+            print_options(headers)
+            sku_idx = int(input(f"Which column in the file represent list of SKUs?: "))
+            sku_col_name = headers[sku_idx]
+            new_skus = new_skus_data_df[sku_col_name].to_list()
+        else:
+            raise ValueError(f"The CSV/XLSX file ({new_skus_data_path}) with newly added SKUs has not data. Review and rerun program.")
+
+    return new_skus
 
 def clean_df(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -118,33 +153,34 @@ def validate_fields_data_df(fields_data_path: Path, fields_data_df: pd.DataFrame
         )
 
     # Check if required fields in dependencies are always processed before the dependent fields
-    fields_data_df_merged = fields_data_df.merge(
-        fields_data_df[['Field', 'Process Order Number']],
-        how='left',
-        left_on='Dependency',
-        right_on='Field',
-        suffixes=('', '_Dependency')
-    )
-    invalid_dependent_fields = fields_data_df_merged.loc[
-        (fields_data_df_merged['Dependency'].notna()) &
-        (fields_data_df_merged['Process Order Number'] <= fields_data_df_merged['Process Order Number_Dependency']),
-        'Field'
-    ].to_list()
-
-    if invalid_dependent_fields:
-        raise ValueError(
-            f"These fields with dependencies are processed before their required fields: {invalid_dependent_fields}"
-            "All fields with dependencies must be processed after their required fields. Correct and rerun program."
+    if fields_data_df['Dependency'].notna().any():
+        fields_data_df_merged = fields_data_df.merge(
+            fields_data_df[['Field', 'Process Order Number']],
+            how='left',
+            left_on='Dependency',
+            right_on='Field',
+            suffixes=('', '_Dependency')
         )
+        invalid_dependent_fields = fields_data_df_merged.loc[
+            (fields_data_df_merged['Dependency'].notna()) &
+            (fields_data_df_merged['Process Order Number'] <= fields_data_df_merged['Process Order Number_Dependency']),
+            'Field'
+        ].to_list()
 
-    # Check if all product fields and variant fields are not mixed together in any process order
+        if invalid_dependent_fields:
+            raise ValueError(
+                f"These fields with dependencies are processed before their required fields: {invalid_dependent_fields}"
+                "All fields with dependencies must be processed after their required fields. Correct and rerun program."
+            )
+
+    # Check if each process order's fields have the same resource type
     resource_per_process = fields_data_df.groupby('Process Order Number')['Resource'].nunique()
     invalid_process_order_numbers = resource_per_process[resource_per_process > 1].drop_duplicates().to_list()
     
     if invalid_process_order_numbers:
         raise ValueError(
             f"These process order numbers are batching fields that belong to products and variants: {invalid_process_order_numbers}\n"
-            "Each batch process must contain fields that belong to either Product or Variant. Correct and rerun program."
+            "Each batch process must contain fields that belong to one of Product, Variant, or Media. Correct and rerun program."
         )
 
     # Check if all notes targeting specific fields are opened and closed

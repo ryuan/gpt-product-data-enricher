@@ -124,17 +124,31 @@ def parse_custom_tags(notes: str) -> Tuple[bool, Optional[List[TagBlock]], List[
 
     return (is_valid, blocks if is_valid else None, errors)
 
-def optimize_notes(notes: str, fields: List[str]) -> str:
+def optimize_notes(notes: str, fields: List[str], product_type: str) -> str:
     """
     Process custom-tagged notes according to rules:
-    - If any opening tag item matches a provided field (substring, case-insensitive), keep the block:
-        - Replace each {...} inside using matching field names, joined with 'or' before the last.
-        - Remove the <...> and </> markers.
-      Else, delete the entire tagged block.
-    - Text outside tags is left unchanged.
+
+    Tag format (chevrons only):
+      - Field-gated:       <F: a, b, c> ... </>
+      - ProductType-gated: <PT: A, B, C> ... </>
+
+    F blocks:
+      - If any tag item matches a provided field (substring, case-insensitive), keep the block.
+      - When kept, replace each {...} inside using matching field names (per __replace_curly_groups),
+        and remove the tag wrappers. Else, delete the entire block.
+
+    PT blocks:
+      - If any tag item matches the product type (substring, case-insensitive), keep the block.
+      - If product_type is missing/blank, delete PT blocks (conservative behavior).
+
+    Text outside tags is left unchanged.
     """
 
-    tag_pat = re.compile(r"<([^<>]+)>(.*?)</>", re.DOTALL)
+    # Matches <F: ...>...</> or <PT: ...>...</>
+    tag_pat = re.compile(
+        r"<\s*(PT|F)\s*:\s*([^<>]+?)\s*>(.*?)</>",
+        re.DOTALL | re.IGNORECASE,
+    )
 
     result_parts: List[str] = []
     last = 0
@@ -143,33 +157,38 @@ def optimize_notes(notes: str, fields: List[str]) -> str:
         # Append text before the block unchanged
         result_parts.append(notes[last:m.start()])
 
-        raw_items = m.group(1)
-        content = m.group(2)
+        kind = m.group(1).upper()          # "PT" or "F"
+        raw_keywords_list = m.group(2)             # comma-separated list
+        content = m.group(3)
 
-        tag_items = [x.strip() for x in raw_items.split(",") if x.strip()]
-        # Determine if this block is relevant (any tag item is a substring of any field)
-        block_fields = __fields_matching_any_keywords(tag_items, fields)
+        keywords = [x.strip() for x in raw_keywords_list.split(",") if x.strip()]
 
-        if block_fields:
-            # Replace curly groups; remove the tag wrappers
-            replaced = __replace_curly_groups(content, fields)
-            result_parts.append(replaced)
-        else:
-            # Drop whole block
-            pass
+        keep = False
+
+        if kind == "F":
+            # Keep if any tag keyword matches any field
+            block_fields = __items_matching_any_keywords(keywords, fields)
+            keep = bool(block_fields)
+
+        elif kind == "PT":
+            # Keep if any tag keyword matches product type
+            block_type = __items_matching_any_keywords(keywords, [product_type])
+            keep = bool(block_type)
+
+        if keep:
+            # Keep content; also allow curly replacement inside any kept block
+            result_parts.append(__replace_curly_groups(content, fields))
+        # else: drop whole block
 
         last = m.end()
 
     # Append remaining tail
     result_parts.append(notes[last:])
-
-    # Light cleanup: collapse spaces created by removals around braces/tags
     optimized_notes = "".join(result_parts)
 
-    # Remove extra spaces before punctuation and tidy double spaces that can arise
+    # Light cleanup
     optimized_notes = re.sub(r"[ \t]+([,.!?;:])", r"\1", optimized_notes)
     optimized_notes = re.sub(r"[ \t]{2,}", " ", optimized_notes)
-    # Trim trailing spaces on each line
     optimized_notes = "\n".join(line.rstrip() for line in optimized_notes.splitlines())
 
     return optimized_notes
@@ -207,21 +226,21 @@ def __english_join(items: List[str]) -> str:
         return f"{items[0]} or {items[1]}"
     return f"{', '.join(items[:-1])}, or {items[-1]}"
 
-def __fields_matching_any_keywords(keywords: List[str], fields: List[str]) -> List[str]:
+def __items_matching_any_keywords(keywords: List[str], items: List[str]) -> List[str]:
     """
-    Return fields that contain ANY of the keywords as substrings (case-insensitive), preserving fields order and deduping.
+    Return fields or product type that contain ANY of the keywords as substrings (case-insensitive).
     """
 
     seen = set()
     out: List[str] = []
-    lower_fields = [(f, f.casefold()) for f in fields]
-    lowers = [k.casefold() for k in keywords]
+    lower_items = [(i, i.casefold()) for i in items]
+    lower_keywords = [k.casefold() for k in keywords]
 
-    for f_orig, f_low in lower_fields:
-        if any(k in f_low for k in lowers):
-            if f_orig not in seen:
-                seen.add(f_orig)
-                out.append(f_orig)
+    for i_orig, i_low in lower_items:
+        if any(k in i_low for k in lower_keywords):
+            if i_orig not in seen:
+                seen.add(i_orig)
+                out.append(i_orig)
 
     return out
 
@@ -235,7 +254,7 @@ def __replace_curly_groups(text: str, fields: List[str]) -> str:
     def repl(m: re.Match) -> str:
         inner = m.group(1)
         items = [x.strip() for x in inner.split(",") if x.strip()]
-        matches = __fields_matching_any_keywords(items, fields)
+        matches = __items_matching_any_keywords(items, fields)
 
         return __english_join(matches)
 

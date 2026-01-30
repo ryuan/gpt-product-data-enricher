@@ -42,12 +42,12 @@ class BatchFiles:
         self.total_tokens = 0
 
 class BatchManager:
-    def __init__(self, client: OpenAI, endpoint: str, model: str, date_time: str, fix_prev_batch: bool):
+    def __init__(self, client: OpenAI, endpoint: str, model: str, date_time: str, is_fix_prev_batch: bool):
         self.client: OpenAI = client
         self.endpoint: str = endpoint
         self.model: str = model
         self.date_time: str = date_time
-        self.fix_prev_batch: bool = fix_prev_batch        
+        self.is_fix_prev_batch: bool = is_fix_prev_batch
 
         self.all_batch_files: List[BatchFiles] = []
         self.current_batch_files: BatchFiles = None
@@ -174,7 +174,7 @@ class BatchManager:
             with open(self.current_batch_files.batch_errors_path, 'w', encoding='ascii') as f:
                 f.write(self.current_batch_files.error_results.text)
                 print(f"Failed results saved to: {self.current_batch_files.batch_errors_path}")
-        elif self.fix_prev_batch and os.path.exists(self.current_batch_files.batch_errors_path):
+        elif self.is_fix_prev_batch and os.path.exists(self.current_batch_files.batch_errors_path):
             os.remove(self.current_batch_files.batch_errors_path)
             print(f"Batch process fix ended with no error file. Deleting previous error file at: {self.current_batch_files.batch_errors_path}")
 
@@ -182,7 +182,7 @@ class BatchManager:
         if self.current_batch_files.batch.output_file_id:
             self.current_batch_files.results = self.client.files.content(self.current_batch_files.batch.output_file_id)
 
-            if not self.fix_prev_batch or (self.fix_prev_batch and not os.path.exists(self.current_batch_files.batch_results_path)):
+            if not self.is_fix_prev_batch or (self.is_fix_prev_batch and not os.path.exists(self.current_batch_files.batch_results_path)):
                 print(f"Downloading completed results to: {self.current_batch_files.batch_results_path}")
                 mode = 'w'
             else:
@@ -228,7 +228,6 @@ class BatchManager:
                     if line.strip():  # Skip empty lines
                         try:
                             result = json.loads(line)
-                            object_id= result['custom_id']
                             body: Dict = result['response']['body']
                             outputs: List[Dict] = body.get('output', body.get('choices'))
 
@@ -237,15 +236,17 @@ class BatchManager:
 
                                 if content:
                                     if isinstance(content, list):
-                                        structured_output: Dict = json.loads(content[0]['text'])
+                                        keyed_structured_output: Dict = json.loads(content[0]['text'])
                                     else:
-                                        structured_output: Dict = json.loads(content)
+                                        keyed_structured_output: Dict = json.loads(content)
 
-                                    structured_line_json = {
-                                        'id': object_id,
-                                        'output': structured_output
-                                    }
-                                    outputs_f.write(json.dumps(structured_line_json, ensure_ascii=True) + "\n")
+                                    for object_id in keyed_structured_output.keys():
+                                        structured_line_json = {
+                                            'id': object_id,
+                                            'output': keyed_structured_output[object_id]
+                                        }
+                                        outputs_f.write(json.dumps(structured_line_json, ensure_ascii=True) + "\n")
+
                                     self.__update_token_usage(result)
                         except json.JSONDecodeError as e:
                             print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
@@ -299,7 +300,7 @@ class BatchManager:
         out_df = pd.DataFrame.from_dict(extracted_data_ref, orient='index')
 
         # Get all product and variant IDs from store_data_df
-        all_object_ids: pd.Series = store_data_df.loc[store_data_df['id'].str.contains(r'gid://shopify/Product/|gid://shopify/ProductVariant/'), 'id']
+        all_object_ids: pd.Series = store_data_df.loc[store_data_df['id'].str.contains(r'gid://shopify/Product/|gid://shopify/ProductVariant/|gid://shopify/MediaImage/'), 'id']
 
         # Create reference for field name to GraphQL field from fields_data_df
         field_names: List[str] = fields_data_df.loc[fields_data_df['Field'].isin(out_df.columns), 'Field'].tolist()
