@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import List, Tuple
 from tag_parsor import parse_custom_tags
 
@@ -24,11 +25,24 @@ def init() -> OpenAI:
 
     return client
 
-def set_model() -> str:
-    models = ['gpt-5', 'gpt-5.1']
-    print_options(models)
+def set_model() -> Tuple[str, str]:
+    models = {
+        'gpt-5': 'high',
+        'gpt-5.1': 'high',
+        'gpt-6-luna': 'max',
+        'gpt-6-sol': 'max'
+    }
+    model_names = list(models.keys())
+    print_options(model_names)
     idx = int(input("Which model would you like to use with the Batch API?: "))
-    return models[idx]
+    model = model_names[idx]
+    return model, models[model]
+
+def set_image_detail() -> str:
+    image_details = ['low', 'auto']
+    print_options(image_details)
+    idx = int(input("Which image detail setting would you like to use?: "))
+    return image_details[idx]
 
 def set_endpoint() -> str:
     endpoints = ['/v1/responses', '/v1/chat/completions']
@@ -52,6 +66,11 @@ def get_prev_batch_dir() -> str:
     prev_batch_dir_idx = int(input("Which previous batch do you want to fix/continue?: "))
     prev_batch_dir = folder_names[prev_batch_dir_idx]
     return prev_batch_dir
+
+def confirm_cancel_on_failure() -> bool:
+    print_options(['Continue batch process even if any failed request detected', 'Cancel batch process if any failed request detected'])
+    cancel_on_failure = bool(int(input("Do you want to cancel batch process if any failed request is detected?: ")))
+    return cancel_on_failure
 
 ### Pre-processing and setup functions
 
@@ -104,7 +123,7 @@ def get_new_skus_list() -> List:
     if has_new_skus:
         data_files = sorted([file for file in INPUT_DIR.iterdir() if file.suffix == '.csv' or file.suffix == '.xlsx'])
         print_options(data_files)
-        file_idx = int(input(f"Which CSV/XLSX file has the list of new SKUs?: "))
+        file_idx = int(input(f"Which CSV/XLSX file (ensure header included) has the list of new SKUs?: "))
         new_skus_data_path = data_files[file_idx]
         new_skus_data_df = clean_df(pd.read_csv(new_skus_data_path) if new_skus_data_path.suffix == '.csv' else pd.read_excel(new_skus_data_path))
 
@@ -215,6 +234,11 @@ def print_options(options: list[str]) -> None:
     print("\n")
     for i, option in enumerate(options):
         print(f"[{i}] {option}")
+
+def get_filename_from_url(url: str) -> str:
+    parsed_url = urlparse(url)
+    filename = os.path.basename(parsed_url.path)
+    return filename
 
 def get_file_size(file_path: Path) -> float:
     if os.path.exists(file_path):

@@ -1,22 +1,25 @@
 import utils
 from datetime import datetime
-from generator import DataExtractor, DataExtractor
+from generator import DataExtractor
 from encoder import Encoder
 from manager import BatchManager
 
 
 def main():
     client = utils.init()
-    model = utils.set_model()
+    model, reasoning_effort = utils.set_model()
     endpoint = utils.set_endpoint()
+    image_detail = utils.set_image_detail()
 
-    # Ask user if this run is to fix a previous batch or to start a new run
+    # Ask user if this run is to fix a previous batch or to start a new run, and if this batch should be cancelled upon detection of any failed requests
     is_fix_prev_batch = utils.confirm_starting_point()
 
     if is_fix_prev_batch:
         date_time = utils.get_prev_batch_dir()
     else:
         date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    cancel_on_failure = utils.confirm_cancel_on_failure()
 
     # Pre-process source files and sequence batches by process order
     supplier_data_path, store_data_path, fields_data_path = utils.get_source_paths()
@@ -26,8 +29,8 @@ def main():
 
     # Initiate PayloadsGenerator and BatchManager object
     encoder = Encoder(model)
-    batch_manager = BatchManager(client, endpoint, model, date_time, is_fix_prev_batch)
-    payloads_generator = DataExtractor(encoder, batch_manager, supplier_data_df, store_data_df, fields_data_df, new_skus)
+    batch_manager = BatchManager(client, endpoint, model, date_time, is_fix_prev_batch, cancel_on_failure)
+    payloads_generator = DataExtractor(encoder, batch_manager, supplier_data_df, store_data_df, fields_data_df, new_skus, reasoning_effort, image_detail)
 
     # Generate payloads for each sequenced batch process, upload the payloads JSONL file, execute the batch, then download results
     for process_order_number in process_order_numbers:
@@ -58,6 +61,8 @@ def main():
             # If this is the final process order sequence, combine all batch outputs for Shopify import
             if process_order_number == max(process_order_numbers):
                 batch_manager.combine_outputs(store_data_df, fields_data_df)
+        else:
+            print(f"Batch {process_order_number} payload has no fields to extract. Moving onto to next batch process.\n")
 
 if __name__ == "__main__":
     main()

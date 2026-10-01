@@ -6,7 +6,7 @@ import time
 import datetime
 import utils
 import pandas as pd
-from typing import List, Dict, BinaryIO
+from typing import List, Dict, BinaryIO, Tuple
 from collections import defaultdict
 from unidecode import unidecode
 
@@ -23,12 +23,14 @@ class BatchFiles:
         self.batch_results_path = f'output/{date_time}/batch_results_{process_order_number}.jsonl'
         self.batch_outputs_path = f'output/{date_time}/batch_outputs_{process_order_number}.jsonl'
         self.batch_errors_path = f'output/{date_time}/batch_errors_{process_order_number}.jsonl'
+        self.img_inputs_ref_cache_path = f'payloads/{date_time}/img_inputs_ref_cache.json'
 
         # Create any missing parent directories
         os.makedirs(os.path.dirname(self.batch_payloads_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.batch_results_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.batch_outputs_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.batch_errors_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.img_inputs_ref_cache_path), exist_ok=True)
 
         self.batch_payloads_file = open(self.batch_payloads_path, 'w', encoding='ascii')
 
@@ -42,16 +44,23 @@ class BatchFiles:
         self.total_tokens = 0
 
 class BatchManager:
-    def __init__(self, client: OpenAI, endpoint: str, model: str, date_time: str, is_fix_prev_batch: bool):
+    def __init__(self, client: OpenAI, endpoint: str, model: str, date_time: str, is_fix_prev_batch: bool, cancel_on_failure: bool):
         self.client: OpenAI = client
         self.endpoint: str = endpoint
         self.model: str = model
         self.date_time: str = date_time
         self.is_fix_prev_batch: bool = is_fix_prev_batch
+        self.cancel_on_failure: bool = cancel_on_failure
 
         self.all_batch_files: List[BatchFiles] = []
         self.current_batch_files: BatchFiles = None
         self.error_ids: set = set()
+
+        self.resource_gid_base: Dict = {
+            'Product': 'gid://shopify/Product/',
+            'Variant': 'gid://shopify/ProductVariant/',
+            'Media': 'gid://shopify/MediaImage/'
+        }
 
     def create_batch_files(self, process_order_number: int):
         self.current_batch_files = BatchFiles(self.date_time, process_order_number)
@@ -100,6 +109,91 @@ class BatchManager:
             
         return prev_batch_process_has_errors
 
+    def load_img_inputs_ref_cache(self, detail: str = 'low', expiration_buffer_seconds: int = 3600) -> Tuple[Dict, Dict]:
+        """
+        Load reusable Responses API image file references and image dimensions from the run-level cache.
+        Expired or nearly expired file IDs are ignored so payloads do not reference stale Files API uploads.
+        """
+        img_inputs_ref = {}
+        img_dimensions_ref = {}
+        skipped_expired = 0
+
+        cache_path = (self.current_batch_files.img_inputs_ref_cache_path if self.current_batch_files else None)
+
+        if cache_path and os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='ascii') as f:
+                    cached_refs = json.load(f)
+
+                now = int(time.time())
+
+                for img_id, cached_ref in cached_refs.items():
+                    file_id = cached_ref.get('file_id')
+                    expires_at = cached_ref.get('expires_at')
+
+                    if not file_id:
+                        continue
+
+                    if expires_at is not None and int(expires_at) <= now + expiration_buffer_seconds:
+                        skipped_expired += 1
+                        continue
+
+                    img_inputs_ref[img_id] = {
+                        'type': 'input_image',
+                        'file_id': file_id,
+                        'detail': detail
+                    }
+
+                    width = cached_ref.get('width')
+                    height = cached_ref.get('height')
+                    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+                        img_dimensions_ref[img_id] = (width, height)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Could not read image input reference cache at {cache_path}: {type(e).__name__}: {e}")
+
+        if img_inputs_ref:
+            print(f"Loaded {len(img_inputs_ref)} reusable image file reference(s) from: {cache_path}")
+        if skipped_expired:
+            print(f"Skipped {skipped_expired} expired or nearly expired image file reference(s).")
+
+        return img_inputs_ref, img_dimensions_ref
+
+    def save_img_input_ref_to_cache(self, img_id: str, img_url: str, img_input: Dict, file_obj, width: int = None, height: int = None) -> None:
+        """
+        Persist one successful Responses API image upload and its dimensions to the run-level cache.
+        Writes atomically so an interrupted run does not corrupt the JSON file.
+        """
+        cache_path = (self.current_batch_files.img_inputs_ref_cache_path if self.current_batch_files else None)
+
+        if cache_path:
+            temp_path = f'{cache_path}.tmp'
+
+            try:
+                if os.path.exists(cache_path):
+                    with open(cache_path, 'r', encoding='ascii') as f:
+                        cached_refs = json.load(f)
+                else:
+                    cached_refs = {}
+            except (json.JSONDecodeError, OSError):
+                cached_refs = {}
+
+            cached_refs[img_id] = {
+                'type': img_input['type'],
+                'file_id': img_input['file_id'],
+                'detail': img_input.get('detail'),
+                'image_url': img_url,
+                'filename': getattr(file_obj, 'filename', None),
+                'created_at': getattr(file_obj, 'created_at', None),
+                'expires_at': getattr(file_obj, 'expires_at', None),
+                'width': width,
+                'height': height
+            }
+
+            with open(temp_path, 'w', encoding='ascii') as f:
+                json.dump(cached_refs, f, ensure_ascii=True, indent=2)
+
+            os.replace(temp_path, cache_path)
+        
     def upload_batch_payloads(self):
         """
         Upload batch payloads JSONL file to OpenAI servers, returning the file upload confirmation object
@@ -137,17 +231,42 @@ class BatchManager:
         Poll the batch job until it reaches a terminal state.
         """
         print(f"Polling batch job {self.current_batch_files.batch.id} every {poll_interval} seconds...")
+
         start = time.monotonic()
+        terminal_statuses = {'completed', 'failed', 'cancelled', 'expired'}
+        api_cancel_requested = False
+        api_cancel_message = ""
 
         while True:
             self.current_batch_files.batch = self.client.batches.retrieve(self.current_batch_files.batch.id)
-            elapsed = datetime.timedelta(seconds=int(time.monotonic()-start))
-            print(f"[{elapsed}] Status: {self.current_batch_files.batch.status}, {self.current_batch_files.batch.request_counts}", end=f"{' ' * 20}\r", flush=True)
 
-            if self.current_batch_files.batch.status in ['completed', 'failed', 'cancelled', 'expired']:
+            # Check for any failed requests in the batch, and terminate it if necessary
+            failed_request_count = 0
+
+            if self.current_batch_files.batch.request_counts:
+                failed_request_count = getattr(self.current_batch_files.batch.request_counts, "failed", 0) or 0
+
+            if (self.cancel_on_failure and not api_cancel_requested and self.current_batch_files.batch.status not in terminal_statuses and failed_request_count > 0):
+                api_cancel_message = f"Cancelling batch due to {failed_request_count} failed request(s)."
+                self.current_batch_files.batch = self.client.batches.cancel(self.current_batch_files.batch.id)
+                api_cancel_requested = True
+
+                # Do not return yet. A cancelled batch may spend time in `cancelling` before reaching terminal `cancelled` status.
+                time.sleep(poll_interval)
+                continue
+
+            elapsed = datetime.timedelta(seconds=int(time.monotonic()-start))
+            print(f"\r[{elapsed}] Status: {self.current_batch_files.batch.status}, {self.current_batch_files.batch.request_counts} {api_cancel_message}\033[K", end="", flush=True)
+
+            # Check the status of the batch
+            if self.current_batch_files.batch.status in terminal_statuses:
                 print(f"\nBatch job execution finished. Checking final batch object for issues...")
 
-                if self.current_batch_files.batch.errors:
+                if api_cancel_requested:
+                    raise ValueError("Batch was cancelled after detecting failed request(s). \n"
+                                     f"Final status: {self.current_batch_files.batch.status}. Request counts: {self.current_batch_files.batch.request_counts}. \n"
+                                     "Download any available partial output and/or error files manually from the OpenAI dashboard.")
+                elif self.current_batch_files.batch.errors:
                     raise ValueError(f"Batch job had errors: {self.current_batch_files.batch.errors}")
                 elif self.current_batch_files.batch.status != "completed":
                     raise ValueError(f"Batch job did not complete successfully. Status: {self.current_batch_files.batch.status}")
@@ -299,8 +418,12 @@ class BatchManager:
         # Build combined dataframe from extracted data (rows = IDs, columns = field names from outputs)
         out_df = pd.DataFrame.from_dict(extracted_data_ref, orient='index')
 
-        # Get all product and variant IDs from store_data_df
-        all_object_ids: pd.Series = store_data_df.loc[store_data_df['id'].str.contains(r'gid://shopify/Product/|gid://shopify/ProductVariant/|gid://shopify/MediaImage/'), 'id']
+        # Get all object IDs from store_data_df for the processed order numbers
+        processed_order_numbers = [batch_files.process_order_number for batch_files in self.all_batch_files]
+        processed_resources = fields_data_df.loc[fields_data_df['Process Order Number'].isin(processed_order_numbers), 'Resource'].unique()
+        resource_gid_bases = [self.resource_gid_base[processed_resource] for processed_resource in processed_resources if processed_resource in self.resource_gid_base]
+        combined_pattern = '|'.join(resource_gid_bases)
+        all_object_ids: pd.Series = store_data_df.loc[store_data_df['id'].str.contains(combined_pattern, na=False), 'id']
 
         # Create reference for field name to GraphQL field from fields_data_df
         field_names: List[str] = fields_data_df.loc[fields_data_df['Field'].isin(out_df.columns), 'Field'].tolist()
@@ -321,15 +444,26 @@ class BatchManager:
             out_df.to_excel(writer, index=True, index_label='id')
 
         # Print completion and follow-up info
-        missing_ids = set(all_object_ids[~all_object_ids.isin(out_df.index)].to_list())
+        missing_ids = set(all_object_ids).difference(out_df.index)
         print(f"Combined outputs of all batches saved to {combined_outputs_path}")
-        print(f"Object IDs omitted from combined outputs due to errors: {self.error_ids}")
-        print(f"Object IDs missing for non-error reasons: {missing_ids - self.error_ids}")
+        print(f"Object IDs omitted from combined outputs due to errors during processing: {self.error_ids}")
+        print(f"Object IDs missing for non-error reasons from completed processes: {missing_ids - self.error_ids}")
 
     def __get_extracted_data(self) -> Dict:
         """
         Parse batch output files and create a reference dict, keyed by product/variant ID, each with a dict of extracted field-value pairs 
         """
+
+        def _decode_inch_token(value):
+            # Restore double quote symbol `"` in any enum values that were encoded as `__IN__` during structured output construction
+            if isinstance(value, str):
+                return value.replace('__IN__', '"')
+            if isinstance(value, list):
+                return [_decode_inch_token(v) for v in value]
+            if isinstance(value, dict):
+                return {k: _decode_inch_token(v) for k, v in value.items()}
+            return value
+        
         extracted_data_ref = defaultdict(dict)
 
         for batch_files in self.all_batch_files:
@@ -344,10 +478,12 @@ class BatchManager:
 
                                 if object_id not in self.error_ids:
                                     for field_name, output in structured_output.items():
-                                        if isinstance(output['value'], str):
-                                            value = output['value']
+                                        decoded_value = _decode_inch_token(output['value'])
+
+                                        if isinstance(decoded_value, str):
+                                            value = decoded_value
                                         else:
-                                            value = json.dumps(output['value'])
+                                            value = json.dumps(decoded_value)
                                         extracted_data_ref[object_id][field_name] = value
                             except json.JSONDecodeError as e:
                                 print(f"Error decoding JSON on line: {line.strip()}. Error: {e}")
